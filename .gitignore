@@ -1,0 +1,24 @@
+# WuBuCodec .gitignore
+build/
+bin/
+*.o
+*.a
+*.so
+*.dylib
+*.exe
+*.out
+*.log
+*.wubv
+*.wubf
+*.wubq
+*.y4m
+*.yuv
+*.raw
+/test_frames/
+/test_frames_320/
+/corpus/
+__pycache__/
+*.pyc
+.DS_Store
+.vscode/
+.idea/
