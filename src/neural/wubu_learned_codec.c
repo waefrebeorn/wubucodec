@@ -1,3 +1,4 @@
+#include <stdint.h>
 /*
  * wubu_learned_codec.c -- Inference engine for trained WuBu codec
  *

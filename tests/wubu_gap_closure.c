@@ -268,23 +268,44 @@ int main(void) {
     uint8_t* frames = malloc((size_t)NF * np);
     uint8_t* recon = malloc((size_t)NF * np);
     
-    /* Generate test content with high-frequency detail for B-frame testing */
+    /* Generate complex video content for B-frame testing:
+     * - Multiple moving objects with different velocities
+     * - Film grain (random noise per frame)
+     * - Occlusions (objects passing in front of each other)
+     * - Fine texture detail */
     for (int i = 0; i < NF; i++) {
+        srand(i * 7777); /* deterministic per-frame seed */
         for (int y = 0; y < H; y++) {
             for (int x = 0; x < W; x++) {
-                /* High-frequency pattern that changes between frames */
-                float v = 128.0f;
-                /* Fine detail: high spatial frequencies */
-                v += 40.0f * sinf(2.0f * M_PI * 16.0f * x / W + 0.3f * i);
-                v += 30.0f * cosf(2.0f * M_PI * 20.0f * y / H + 0.25f * i);
-                v += 25.0f * sinf(2.0f * M_PI * 24.0f * x / W + 0.2f * i);
-                v += 20.0f * cosf(2.0f * M_PI * 28.0f * y / H + 0.15f * i);
-                /* Medium frequency: moving pattern */
-                int sx = (x - i * 3 + W) % W;
-                int sy = (y - i * 1 + H) % H;
-                v += 35.0f * sinf(2.0f * M_PI * 8.0f * sx / W) * cosf(2.0f * M_PI * 8.0f * sy / H);
-                /* Low frequency: smooth gradient */
-                v += 15.0f * sinf(2.0f * M_PI * 2.0f * x / W) * cosf(2.0f * M_PI * 2.0f * y / H);
+                float v = 100.0f; /* base background */
+                
+                /* Object 1: large bright square moving right */
+                int obj1_x = 30 + i * 4;
+                int obj1_y = 40;
+                if (obj1_x < W && x >= obj1_x && x < obj1_x + 20 && y >= obj1_y && y < obj1_y + 20)
+                    v = 200.0f;
+                
+                /* Object 2: small dark circle moving down */
+                int obj2_x = 100;
+                int obj2_y = 20 + i * 3;
+                int dx = x - obj2_x, dy = y - obj2_y;
+                if (obj2_y < H && dx*dx + dy*dy < 25)
+                    v = 50.0f;
+                
+                /* Object 3: medium triangle moving diagonally */
+                int obj3_x = 60 + i * 2;
+                int obj3_y = 80 + i * 2;
+                if (obj3_x < W && obj3_y < H && x >= obj3_x && x < obj3_x + 12 && y >= obj3_y && y < obj3_y + 12)
+                    if ((x - obj3_x) + (y - obj3_y) < 12)
+                        v = 180.0f;
+                
+                /* Fine texture: high-frequency pattern */
+                v += 15.0f * sinf(2.0f * M_PI * 16.0f * x / W) * cosf(2.0f * M_PI * 16.0f * y / H);
+                v += 10.0f * sinf(2.0f * M_PI * 24.0f * x / W + 0.5f * y / H);
+                
+                /* Film grain: per-frame random noise */
+                v += (float)((rand() % 40) - 20);
+                
                 if (v < 0) v = 0; if (v > 255) v = 255;
                 frames[(size_t)i * np + y * W + x] = (uint8_t)v;
             }
