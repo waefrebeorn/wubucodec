@@ -1069,6 +1069,7 @@ int wubu_encode_frame_preset(const uint8_t* orig,
                 /* Ultra-fast P-frame path: inline MC + DCT + IDCT */
                 int16_t dq[64]; /* declare at block scope for later use */
                 int16_t res[64]; /* residual block */
+                uint8_t pred_block[64];
                 int mvx=0,mvy=0;
                 
                 /* AAN DCT constants */
@@ -1085,22 +1086,24 @@ int wubu_encode_frame_preset(const uint8_t* orig,
                 int fx = mvx / 4, fy = mvy / 4;
                 int dx = mvx - fx * 4, dy = mvy - fy * 4;
                 
-                uint8_t pred[64];
                 if(dx == 0 && dy == 0){
-                    /* Integer-pel: direct copy */
+                    /* Integer-pel: direct copy with boundary check */
                     for(int r=0;r<BS;r++)
-                        for(int c=0;c<BS;c++)
-                            pred[r*BS+c] = ref_past[(by*BS+r)*W + bx*BS+c];
+                        for(int c=0;c<BS;c++){
+                            int sy = by*BS+r, sx = bx*BS+c;
+                            if(sy >= H || sx >= W) pred_block[r*BS+c] = 0;
+                            else pred_block[r*BS+c] = ref_past[sy*W + sx];
+                        }
                 }else{
-                    /* Half/quarter-pel: bilinear */
+                    /* Half/quarter-pel: bilinear with boundary check */
                     for(int r=0;r<BS;r++)
                         for(int c=0;c<BS;c++){
                             int sy = by*BS+r+fy, sx = bx*BS+c+fx;
-                            if(sy<0||sy>=H-1||sx<0||sx>=W-1){pred[r*BS+c]=0;continue;}
+                            if(sy<0||sy>=H-1||sx<0||sx>=W-1){pred_block[r*BS+c]=0;continue;}
                             int v00=ref_past[sy*W+sx], v10=ref_past[sy*W+sx+1];
                             int v01=ref_past[(sy+1)*W+sx], v11=ref_past[(sy+1)*W+sx+1];
                             float v=v00*(4-dx)*(4-dy)/16.0f+v10*dx*(4-dy)/16.0f+v01*(4-dx)*dy/16.0f+v11*dx*dy/16.0f;
-                            pred[r*BS+c]=(uint8_t)(v<0?0:(v>255?255:(int)(v+0.5f)));
+                            pred_block[r*BS+c]=(uint8_t)(v<0?0:(v>255?255:(int)(v+0.5f)));
                         }
                 }
                 
@@ -1112,7 +1115,7 @@ int wubu_encode_frame_preset(const uint8_t* orig,
                 /* Process 8x8 block */
                 for(int r=0;r<BS;r++)
                     for(int c=0;c<BS;c++){
-                        int val = (int)orig[(by+r)*W+bx+c] - (int)pred[r*BS+c];
+                        int val = (int)orig[(by+r)*W+bx+c] - (int)pred_block[r*BS+c];
                         res[r*BS+c] = (int16_t)val;
                     }
                 
@@ -1216,7 +1219,7 @@ int wubu_encode_frame_preset(const uint8_t* orig,
                 /* Reconstruct */
                 for(int r=0;r<BS;r++)
                     for(int c=0;c<BS;c++){
-                        int val = pred[r*BS+c] + tmp[r*BS+c];
+                        int val = pred_block[r*BS+c] + tmp[r*BS+c];
                         if(val<0)val=0; if(val>255)val=255;
                         recon_out[(by+r)*W+(bx+c)]=(uint8_t)val;
                     }
