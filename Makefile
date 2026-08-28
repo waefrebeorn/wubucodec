@@ -100,7 +100,10 @@ CODEC_SRCS = $(SRC)/codec/wubu_encoder.c \
              $(SRC)/math/wubu_loss.c \
              $(SRC)/math/wubu_ratecontrol.c \
              $(SRC)/math/wubu_frame_parallel.c \
-             $(SRC)/math/wubu_tile_parallel.c
+             $(SRC)/math/wubu_tile_parallel.c \
+             $(SRC)/math/wubu_wpp.c \
+             $(SRC)/math/wubu_gop_parallel.c \
+             $(SRC)/math/wubu_thread_pool.c
 
 CODEC_OBJS = $(patsubst $(SRC)/%.c,$(OBJ)/%.o,$(CODEC_SRCS))
 

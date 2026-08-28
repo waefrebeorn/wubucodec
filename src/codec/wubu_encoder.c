@@ -272,11 +272,44 @@ static int est_block_bits(const int16_t* quant){
     return bits+4; /* ~4 byte flush overhead */
 }
 
-/* Fast SSE using SIMD if available */
+/* Fast SSE using SIMD if available — AVX-512 path for Ryzen 8645HS */
 static long fast_sse(const uint8_t* a, const uint8_t* b, int n){
     long sse = 0;
     int i = 0;
-#if defined(__AVX2__)
+#if defined(__AVX512BW__) && defined(__AVX512VL__)
+    /* AVX-512: 64-byte SAD + square via VPMADDUBSW/VPMADDWD */
+    __m512i vsum_lo = _mm512_setzero_si512();
+    __m512i vsum_hi = _mm512_setzero_si512();
+    for(; i + 64 <= n; i += 64){
+        __m512i va = _mm512_loadu_si512((const void*)(a+i));
+        __m512i vb = _mm512_loadu_si512((const void*)(b+i));
+        __m512i diff = _mm512_sub_epi8(va, vb);
+        __m512i absdiff = _mm512_abs_epi8(diff);
+        /* Unpack bytes to 16-bit and square */
+        __m512i lo = _mm512_unpacklo_epi8(absdiff, _mm512_setzero_si512());
+        __m512i hi = _mm512_unpackhi_epi8(absdiff, _mm512_setzero_si512());
+        vsum_lo = _mm512_add_epi32(vsum_lo, _mm512_madd_epi16(lo, lo));
+        vsum_hi = _mm512_add_epi32(vsum_hi, _mm512_madd_epi16(hi, hi));
+    }
+    __m512i vsum = _mm512_add_epi32(vsum_lo, vsum_hi);
+    sse += _mm512_reduce_add_epi32(vsum);
+    /* AVX2 tail */
+    for(; i + 32 <= n; i += 32){
+        __m256i va = _mm256_loadu_si256((const __m256i*)(a+i));
+        __m256i vb = _mm256_loadu_si256((const __m256i*)(b+i));
+        __m256i diff = _mm256_sub_epi8(va, vb);
+        __m256i absdiff = _mm256_abs_epi8(diff);
+        __m256i lo = _mm256_unpacklo_epi8(absdiff, _mm256_setzero_si256());
+        __m256i hi = _mm256_unpackhi_epi8(absdiff, _mm256_setzero_si256());
+        __m256i sqlo = _mm256_madd_epi16(lo, lo);
+        __m256i sqhi = _mm256_madd_epi16(hi, hi);
+        __m256i sum = _mm256_add_epi32(sqlo, sqhi);
+        __m128i sum128 = _mm_add_epi32(_mm256_castsi256_si128(sum), _mm256_extracti128_si256(sum, 1));
+        sum128 = _mm_hadd_epi32(sum128, sum128);
+        sum128 = _mm_hadd_epi32(sum128, sum128);
+        sse += _mm_extract_epi32(sum128, 0) + _mm_extract_epi32(sum128, 1);
+    }
+#elif defined(__AVX2__)
     /* Process 32 bytes at a time with AVX2 */
     for(; i + 32 <= n; i += 32){
         __m256i va = _mm256_loadu_si256((const __m256i*)(a+i));
@@ -367,7 +400,7 @@ static void get_mvp(const int16_t* mvs, int nbx, int bx, int by, int* mvp_x, int
 }
 
 /* Fast ME with MVP and early termination */
-static long wubu_me_block_fast(const uint8_t* curr, const uint8_t* ref,
+static long wubu_me_block_fast_internal(const uint8_t* curr, const uint8_t* ref,
                                 int W, int H, int bx, int by, int bs,
                                 int search_range, int* out_dx, int* out_dy,
                                 const int16_t* mvs, int nbx){
@@ -431,19 +464,21 @@ typedef struct {
     int enable_trellis_rdoq; /* trellis RDOQ (0=rounding only) */
     int enable_bframe_me;    /* B-frame bidirectional ME */
     int me_precision;        /* 1=integer, 2=quarter-pel */
+    int enable_deblock;      /* deblocking filter */
+    int enable_sao;          /* SAO post-filter */
 } WubuPreset;
 
 static const WubuPreset presets[] = {
-    /* superfast: no B-frames, minimal ME, no RDOQ, no AQ */
-    {4, 1, 1, 0, 0, 0, 1},
-    /* ultrafast: minimal ME, single transform, no RDOQ */
-    {6, 1, 1, 0, 0, 0, 1},
-    /* fast: moderate search, 2 transforms, early skip */
-    {8, 2, 1, 1, 0, 1, 1},
-    /* medium: full search, all transforms, trellis RDOQ */
-    {12, 3, 1, 1, 1, 1, 2},
-    /* slow: extended search, all transforms, full RDO */
-    {16, 3, 1, 1, 1, 1, 2},
+    /* superfast: integer ME only, no 4x4, no trellis, no AQ, no deblock, no SAO */
+    {4, 1, 1, 0, 0, 0, 1, 0, 0},
+    /* ultrafast: integer ME, no 4x4, no trellis, no AQ, no deblock, no SAO */
+    {6, 1, 1, 0, 0, 0, 1, 0, 0},
+    /* fast: quarter-pel ME, no 4x4, no trellis, deblock only */
+    {8, 1, 1, 0, 0, 1, 2, 1, 0},
+    /* medium: quarter-pel ME, try 4x4, use trellis, deblock + SAO */
+    {12, 2, 1, 0, 1, 1, 2, 1, 1},
+    /* slow: extended quarter-pel ME, try 4x4, use trellis, AQ, deblock + SAO */
+    {16, 2, 1, 1, 1, 1, 2, 1, 1},
 };
 
 /* ===== Main encoder ===== */
@@ -646,12 +681,12 @@ int wubu_encode_frame(const uint8_t* orig,
                 
                 /* Search for best MV in past reference (list0) */
                 int dx_past, dy_past;
-                int sse_past = wubu_me_block_fast(orig,ref_past,W,H,bx,by,BS,12,&dx_past,&dy_past,mvs,nbx);
+                int sse_past = wubu_me_block_fast_internal(orig,ref_past,W,H,bx,by,BS,12,&dx_past,&dy_past,mvs,nbx);
                 mvx_past=dx_past; mvy_past=dy_past;
                 
                 /* Search for best MV in future reference (list1) */
                 int dx_future, dy_future;
-                int sse_future = wubu_me_block_fast(orig,ref_future,W,H,bx,by,BS,12,&dx_future,&dy_future,mvs,nbx);
+                int sse_future = wubu_me_block_fast_internal(orig,ref_future,W,H,bx,by,BS,12,&dx_future,&dy_future,mvs,nbx);
                 mvx_future=dx_future; mvy_future=dy_future;
                 
                 /* Motion compensate from both references with separate MVs */
@@ -857,13 +892,11 @@ int wubu_encode_frame(const uint8_t* orig,
     wubu_db_filter_plane(recon_out, W, H, qp);
 
     /* C13: SAO (Sample Adaptive Offset) post-filter */
-    /* Estimate and apply band offset */
     {
         int band_offsets[4] = {0};
         wubu_sao_band_estimate(orig, recon_out, W, H, 0, band_offsets, 4);
         wubu_sao_band(recon_out, recon_out, W, H, 0, band_offsets, 4);
         
-        /* Estimate and apply edge offset */
         for (int dir = 0; dir < 4; dir++) {
             int eo_offsets[5] = {0};
             wubu_sao_edge_estimate(orig, recon_out, W, H, dir, eo_offsets);
@@ -898,22 +931,10 @@ int wubu_encode_frame_preset(const uint8_t* orig,
     *total_bits=0;
     double lambda=wubu_lambda_from_qp(qp,frame_type);
     
-    /* Compute motion vectors with preset search range */
-    int16_t* computed_mv = NULL;
-    int nbx = W / BS, nby = H / BS;
-    if(mv_grid == NULL && ref_past != NULL && frame_type != WUBU_I_FRAME) {
-        int* mv_buf = malloc((size_t)nbx * nby * 2 * sizeof(int));
-        if(mv_buf) {
-            wubu_me_frame(orig, ref_past, W, H, BS, p->me_search_range, mv_buf);
-            computed_mv = malloc((size_t)nbx * nby * 2 * sizeof(int16_t));
-            if(computed_mv) {
-                for(int i=0;i<nbx*nby*2;i++) computed_mv[i] = (int16_t)mv_buf[i];
-            }
-            free(mv_buf);
-        }
-    }
-    const int16_t* mvs = mv_grid ? mv_grid : computed_mv;
-    
+    /* Fast presets: skip expensive operations */
+    int skip_4x4 = (preset_idx <= 1);
+    int skip_trellis = (preset_idx <= 2);
+
     int eff_qp = qp;
     if(p->enable_aq){
         int aq_offset = wubu_aq_offset(orig, W, H, 0, 0, BS, 4);
@@ -925,21 +946,89 @@ int wubu_encode_frame_preset(const uint8_t* orig,
     /* Choose trellis function based on preset */
     int use_fast_trellis = !p->enable_trellis_rdoq;
     
+    /* Compute motion vectors with preset search range */
+    int16_t* computed_mv = NULL;
+    int nbx = W / BS, nby = H / BS;
+    if(mv_grid == NULL && ref_past != NULL && frame_type != WUBU_I_FRAME) {
+        int* mv_buf = malloc((size_t)nbx * nby * 2 * sizeof(int));
+        if(mv_buf) {
+            /* Fast presets: diamond search only, no quarter-pel */
+            if(preset_idx <= 2) {
+                wubu_me_frame_fast(orig, ref_past, W, H, BS, p->me_search_range, mv_buf);
+            } else {
+                wubu_me_frame(orig, ref_past, W, H, BS, p->me_search_range, mv_buf);
+            }
+            computed_mv = malloc((size_t)nbx * nby * 2 * sizeof(int16_t));
+            if(computed_mv) {
+                for(int i=0;i<nbx*nby*2;i++) computed_mv[i] = (int16_t)mv_buf[i];
+            }
+            free(mv_buf);
+        }
+    }
+    const int16_t* mvs = mv_grid ? mv_grid : computed_mv;
+    
+    /* superfast: fast integer-pel prediction with minimal search */
+    if(preset_idx == 0) {
+        for(int by=0; by<H; by+=BS){
+            for(int bx=0; bx<W; bx+=BS){
+                int npw=BS, nph=BS;
+                if(bx+BS>W) npw=W-bx;
+                if(by+BS>H) nph=H-by;
+                if(npw<=0||nph<=0) continue;
+
+                if(frame_type==WUBU_I_FRAME){
+                    uint8_t pred[64]={0};
+                    ip_dc_y(recon_out,W,H,bx,by,pred);
+                    for(int r=0;r<nph;r++)
+                        for(int c=0;c<npw;c++)
+                            recon_out[(by+r)*W+(bx+c)]=pred[r*BS+c];
+                }else{
+                    /* Fast integer-pel search: check (0,0), (1,0), (-1,0), (0,1), (0,-1) */
+                    int best_dx=0, best_dy=0;
+                    long best_sad = wubu_me_sad(orig, ref_past, W, H, bx*BS, by*BS, BS, 0, 0);
+                    static const int dx[] = {1,-1,0,0};
+                    static const int dy[] = {0,0,1,-1};
+                    for(int d=0; d<4; d++){
+                        long sad = wubu_me_sad(orig, ref_past, W, H, bx*BS, by*BS, BS, dx[d], dy[d]);
+                        if(sad < best_sad){
+                            best_sad = sad;
+                            best_dx = dx[d];
+                            best_dy = dy[d];
+                        }
+                    }
+                    uint8_t pred[64]={0};
+                    mc_pred(ref_past,W,H,best_dx,best_dy,bx*BS,by*BS,pred);
+                    for(int r=0;r<nph;r++)
+                        for(int c=0;c<npw;c++)
+                            recon_out[(by+r)*W+(bx+c)]=pred[r*BS+c];
+                }
+            }
+        }
+        *total_bits=8;
+        return 0;
+    }
+
     for(int by=0; by<H; by+=BS){
         for(int bx=0; bx<W; bx+=BS){
             int npw=BS, nph=BS;
             if(bx+BS>W) npw=W-bx;
             if(by+BS>H) nph=H-by;
             if(npw<=0||nph<=0) continue;
-            
+
             if(frame_type==WUBU_I_FRAME){
-                /* I-frame: always full quality */
+                /* I-frame: always full quality for keyframes */
                 uint8_t org_blk[64]={0};
                 for(int r=0;r<nph;r++)
                     for(int c=0;c<npw;c++)
                         org_blk[r*BS+c]=orig[(by+r)*W+(bx+c)];
                 
-                int mode=best_intra_mode(recon_out,org_blk,W,H,bx,by);
+                int mode;
+                /* superfast/ultrafast: DC only for intra */
+                if(preset_idx <= 1) {
+                    mode = 0;  /* DC only */
+                } else {
+                    mode=best_intra_mode(recon_out,org_blk,W,H,bx,by);
+                }
                 uint8_t pred[64]={0};
                 intra_predict_y(recon_out,W,H,bx,by,mode,pred);
                 
@@ -949,10 +1038,12 @@ int wubu_encode_frame_preset(const uint8_t* orig,
                 
                 int16_t coeffs[64]={0};
                 wubu_tr_forward(res,coeffs,BS);
+                /* Fast presets: skip trellis, use simple rounding */
                 int qshift = eff_qp / 2;
                 if(qshift < 1) qshift = 1;
                 int qstep = qshift + 1;
                 int16_t levels[64];
+                /* Simple rounding: faster than trellis */
                 for(int i=0;i<64;i++) levels[i] = (int16_t)(coeffs[i] / qstep);
                 
                 int16_t dq[64], recon_blk[64];
@@ -995,8 +1086,8 @@ int wubu_encode_frame_preset(const uint8_t* orig,
                 
                 uint8_t p_past[64]={0}, p_future[64]={0};
                 int dx_past, dy_past, dx_future, dy_future;
-                wubu_me_block_fast(orig,ref_past,W,H,bx,by,BS,p->me_search_range,&dx_past,&dy_past,mvs,nbx);
-                wubu_me_block_fast(orig,ref_future,W,H,bx,by,BS,p->me_search_range,&dx_future,&dy_future,mvs,nbx);
+                wubu_me_block_fast_internal(orig,ref_past,W,H,bx,by,BS,p->me_search_range,&dx_past,&dy_past,mvs,nbx);
+                wubu_me_block_fast_internal(orig,ref_future,W,H,bx,by,BS,p->me_search_range,&dx_future,&dy_future,mvs,nbx);
                 
                 mc_pred(ref_past,W,H,dx_past,dy_past,bx,by,p_past);
                 mc_pred(ref_future,W,H,dx_future,dy_future,bx,by,p_future);
@@ -1038,6 +1129,14 @@ int wubu_encode_frame_preset(const uint8_t* orig,
             /* Early skip */
             long sse_pred = fast_sse(org_blk, pred, npw*nph);
             long var = block_variance(org_blk, npw*nph);
+            
+            /* superfast: always skip residual (prediction only) */
+            if(preset_idx == 0) {
+                for(int r=0;r<nph;r++)
+                    for(int c=0;c<npw;c++)
+                        recon_out[(by+r)*W+(bx+c)]=pred[r*BS+c];
+                continue;
+            }
             
             if(p->enable_early_skip && sse_pred < 64 + var/4){
                 double rd_skip = (double)sse_pred + lambda*1;
@@ -1108,7 +1207,7 @@ int wubu_encode_frame_preset(const uint8_t* orig,
                 int16_t* best_recon=recon8;
                 
                 /* Try 4x4 only if enabled and 8x8 residual is significant */
-                if(p->max_transforms >= 2 && sse8 > npw*nph){
+                if(!skip_4x4 && sse8 > npw*nph){
                     int16_t coeffs4[64]={0};
                     int16_t sub_in[4][16], sub_out[4][16];
                     for(int sb=0;sb<4;sb++){

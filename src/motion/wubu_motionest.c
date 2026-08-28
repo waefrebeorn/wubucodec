@@ -204,6 +204,74 @@ long wubu_me_block_hierarchical(const uint8_t* curr, const uint8_t* ref,
 long wubu_me_block(const uint8_t* curr,const uint8_t* ref,
                     int W,int H,int bx,int by,int bs,
                     int search_range,int* out_dx,int* out_dy){
+    return wubu_me_block_fast(curr, ref, W, H, bx, by, bs, search_range, out_dx, out_dy, NULL, W/bs);
+}
+
+/* Fast ME with diamond search and early termination */
+long wubu_me_block_fast(const uint8_t* curr,const uint8_t* ref,
+                    int W,int H,int bx,int by,int bs,
+                    int search_range,int* out_dx,int* out_dy,
+                    const int16_t* mvs,int nbx){
+    /* Get MVP from neighbors */
+    int mvp_x = 0, mvp_y = 0;
+    if(mvs){
+        int idx = by/bs * nbx + bx/bs;
+        if(idx >= 0 && idx < nbx * (H/bs)){
+            mvp_x = mvs[idx*2];
+            mvp_y = mvs[idx*2+1];
+        }
+    }
+    
+    /* Start from MVP */
+    int best_dx = mvp_x;
+    int best_dy = mvp_y;
+    long best_sad = wubu_me_sad(curr, ref, W, H, bx, by, bs, mvp_x, mvp_y);
+    
+    /* Early termination: if MVP SAD is very low, skip search */
+    if(best_sad < bs * bs * 4){
+        *out_dx = best_dx;
+        *out_dy = best_dy;
+        return best_sad;
+    }
+    
+    /* Also check (0,0) for static regions */
+    long sad_zero = wubu_me_sad(curr, ref, W, H, bx, by, bs, 0, 0);
+    if(sad_zero < best_sad){
+        best_sad = sad_zero;
+        best_dx = 0;
+        best_dy = 0;
+    }
+    
+    /* Diamond search around best */
+    static const int dia_dx[] = {0, -1, 0, 1, 0};
+    static const int dia_dy[] = {-1, 0, 1, 0, -1};
+    
+    int improved = 1;
+    while(improved){
+        improved = 0;
+        for(int d = 0; d < 4; d++){
+            int ndx = best_dx + dia_dx[d];
+            int ndy = best_dy + dia_dy[d];
+            if(abs(ndx) > search_range || abs(ndy) > search_range) continue;
+            long sad = wubu_me_sad(curr, ref, W, H, bx, by, bs, ndx, ndy);
+            if(sad < best_sad){
+                best_sad = sad;
+                best_dx = ndx;
+                best_dy = ndy;
+                improved = 1;
+            }
+        }
+    }
+    
+    *out_dx = best_dx;
+    *out_dy = best_dy;
+    return best_sad;
+}
+
+/* Full ME with quarter-pel refinement for quality mode */
+long wubu_me_block_full(const uint8_t* curr,const uint8_t* ref,
+                    int W,int H,int bx,int by,int bs,
+                    int search_range,int* out_dx,int* out_dy){
     /* Phase 1: Integer-pel hexagon search (6 directions) */
     int best_dx=0,best_dy=0;
     long best_sad=wubu_me_sad(curr,ref,W,H,bx,by,bs,0,0);
@@ -269,7 +337,7 @@ long wubu_me_block(const uint8_t* curr,const uint8_t* ref,
 /* estimate motion vectors for all blocks in a frame */
 int wubu_me_frame(const uint8_t* curr,const uint8_t* ref,
                    int W,int H,int bs,int search_range,
-                   int* out_mvs /* [n_blocks_x*n_blocks_y][2], in quarter-pel units */){
+                   int* out_mvs){
     int nbx=W/bs,nby=H/bs;
     int count=0;
     /* Use hierarchical ME for large frames, fast ME for small frames */
@@ -282,10 +350,9 @@ int wubu_me_frame(const uint8_t* curr,const uint8_t* ref,
                 int idx = by*nbx+bx;
                 out_mvs[idx*2]=dx;
                 out_mvs[idx*2+1]=dy;
-                count++;
             }
     }else{
-        /* Fast ME for small frames (no MVP to avoid race conditions) */
+        /* Fast ME for small frames */
         for(int by=0;by<nby;by++)
             for(int bx=0;bx<nbx;bx++){
                 int dx,dy;
@@ -293,10 +360,25 @@ int wubu_me_frame(const uint8_t* curr,const uint8_t* ref,
                 int idx = by*nbx+bx;
                 out_mvs[idx*2]=dx;
                 out_mvs[idx*2+1]=dy;
-                count++;
             }
     }
     return count;
+}
+
+/* Fast ME frame - diamond search only, no quarter-pel */
+int wubu_me_frame_fast(const uint8_t* curr,const uint8_t* ref,
+                        int W,int H,int bs,int search_range,
+                        int* out_mvs){
+    int nbx=W/bs,nby=H/bs;
+    for(int by=0;by<nby;by++)
+        for(int bx=0;bx<nbx;bx++){
+            int dx,dy;
+            wubu_me_block_fast(curr,ref,W,H,bx*bs,by*bs,bs,search_range,&dx,&dy,NULL,nbx);
+            int idx = by*nbx+bx;
+            out_mvs[idx*2]=dx;
+            out_mvs[idx*2+1]=dy;
+        }
+    return nbx*nby;
 }
 
 /* apply motion compensation: build predicted frame from reference + MVs.

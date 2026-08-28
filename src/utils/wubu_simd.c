@@ -93,7 +93,31 @@ void wubu_simd_hamilton_batch(const float* a,const float* b,
 /* ===== SAD (Sum of Absolute Differences) for motion estimation ===== */
 
 long wubu_simd_sad(const uint8_t* a,const uint8_t* b,int n){
-#if defined(__AVX2__)
+#if defined(__AVX512BW__) && defined(__AVX512VL__)
+    /* AVX-512: process 64 bytes at a time with VPSADBW */
+    __m512i sum=_mm512_setzero_si512();
+    long i=0;
+    for(;i+64<=n;i+=64){
+        __m512i va=_mm512_loadu_si512((const void*)(a+i));
+        __m512i vb=_mm512_loadu_si512((const void*)(b+i));
+        __m512i sad=_mm512_sad_epu8(va,vb);
+        sum=_mm512_add_epi64(sum,sad);
+    }
+    long total=_mm512_reduce_add_epi64(sum);
+    /* 32-byte AVX-512 tail */
+    for(;i+32<=n;i+=32){
+        __m256i va=_mm256_loadu_si256((const __m256i*)(a+i));
+        __m256i vb=_mm256_loadu_si256((const __m256i*)(b+i));
+        __m256i sad=_mm256_sad_epu8(va,vb);
+        __m256i sum256=_mm256_add_epi64(_mm256_setzero_si256(),sad);
+        uint64_t lanes[4];
+        _mm256_storeu_si256((__m256i*)lanes,sum256);
+        total+=lanes[0]+lanes[1]+lanes[2]+lanes[3];
+    }
+    /* scalar tail */
+    for(;i<n;i++)total+=abs(a[i]-b[i]);
+    return total;
+#elif defined(__AVX2__)
     __m256i sum=_mm256_setzero_si256();
     long i=0;
     for(;i+32<=n;i+=32){
