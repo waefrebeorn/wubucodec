@@ -96,7 +96,8 @@ CODEC_SRCS = $(SRC)/codec/wubu_encoder.c \
              $(SRC)/math/wubu_nested_encoder.c \
              $(SRC)/math/wubu_scene.c \
              $(SRC)/math/wubu_q_controller.c \
-             $(SRC)/math/wubu_loss.c
+             $(SRC)/math/wubu_loss.c \
+             $(SRC)/math/wubu_ratecontrol.c
 
 CODEC_OBJS = $(patsubst $(SRC)/%.c,$(OBJ)/%.o,$(CODEC_SRCS))
 

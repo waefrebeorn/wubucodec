@@ -338,8 +338,10 @@ typedef struct {
 } WubuPreset;
 
 static const WubuPreset presets[] = {
-    /* ultrafast: minimal search, single transform, no RDOQ */
+    /* superfast: no B-frames, minimal ME, no RDOQ, no AQ */
     {4, 1, 1, 0, 0, 0, 1},
+    /* ultrafast: minimal ME, single transform, no RDOQ */
+    {6, 1, 1, 0, 0, 0, 1},
     /* fast: moderate search, 2 transforms, early skip */
     {8, 2, 1, 1, 0, 1, 1},
     /* medium: full search, all transforms, trellis RDOQ */
@@ -386,6 +388,8 @@ int wubu_encode_frame(const uint8_t* orig,
     int eff_qp = qp + aq_offset;
     if(eff_qp < 0) eff_qp = 0;
     if(eff_qp > 51) eff_qp = 51;
+    
+    int use_fast_trellis = 1; /* original encoder: fast trellis by default */
 
     /* encode in 8×8 blocks */
     for(int by=0;by<H;by+=BS){
@@ -541,7 +545,8 @@ int wubu_encode_frame(const uint8_t* orig,
                     if(qshift < 1) qshift = 1;
                     double qstep8 = 1 << qshift;
                     int16_t levels8[64];
-                    wubu_trellis_quantize(coeffs8,64,qstep8,lambda,levels8);
+                    if(use_fast_trellis) wubu_trellis_quantize_fast(coeffs8,64,qstep8,lambda,levels8);
+                    else wubu_trellis_quantize(coeffs8,64,qstep8,lambda,levels8);
                     int bits8=0;
                     for(int i=0;i<64;i++) if(levels8[i]!=0) bits8+=eg_bits(levels8[i]);
                     int16_t dq8[64], recon8[64];
@@ -614,7 +619,8 @@ int wubu_encode_frame(const uint8_t* orig,
                     for(int sb=0;sb<4;sb++)
                         for(int i=0;i<16;i++)
                             coeffs4[sb*16+i]=sub_out[sb][i];
-                    wubu_trellis_quantize(coeffs4,64,qstep8,lambda,levels4);
+                    if(use_fast_trellis) wubu_trellis_quantize_fast(coeffs4,64,qstep8,lambda,levels4);
+                    else wubu_trellis_quantize(coeffs4,64,qstep8,lambda,levels4);
                     int16_t dq4[64];
                     for(int i=0;i<64;i++) dq4[i]=(int16_t)(levels4[i]*qstep8);
                     for(int sb=0;sb<4;sb++){
@@ -712,7 +718,7 @@ int wubu_encode_frame_preset(const uint8_t* orig,
                               long* total_bits,
                               int preset_idx){
     if(preset_idx < 0) preset_idx = 0;
-    if(preset_idx > 3) preset_idx = 3;
+    if(preset_idx > 4) preset_idx = 4;
     
     const WubuPreset* p = &presets[preset_idx];
     
@@ -746,6 +752,9 @@ int wubu_encode_frame_preset(const uint8_t* orig,
         if(eff_qp < 0) eff_qp = 0;
         if(eff_qp > 51) eff_qp = 51;
     }
+    
+    /* Choose trellis function based on preset */
+    int use_fast_trellis = !p->enable_trellis_rdoq;
     
     for(int by=0; by<H; by+=BS){
         for(int bx=0; bx<W; bx+=BS){
@@ -872,7 +881,8 @@ int wubu_encode_frame_preset(const uint8_t* orig,
                     if(qshift < 1) qshift = 1;
                     double qstep8 = 1 << qshift;
                     int16_t levels8[64];
-                    wubu_trellis_quantize(coeffs8,64,qstep8,lambda,levels8);
+                    if(use_fast_trellis) wubu_trellis_quantize_fast(coeffs8,64,qstep8,lambda,levels8);
+                    else wubu_trellis_quantize(coeffs8,64,qstep8,lambda,levels8);
                     int bits8=0;
                     for(int i=0;i<64;i++) if(levels8[i]!=0) bits8+=eg_bits(levels8[i]);
                     int16_t dq8[64], recon8[64];
@@ -943,7 +953,8 @@ int wubu_encode_frame_preset(const uint8_t* orig,
                         for(int i=0;i<16;i++)
                             coeffs4[sb*16+i]=sub_out[sb][i];
                     int16_t levels4[64];
-                    wubu_trellis_quantize(coeffs4,64,qstep8,lambda,levels4);
+                    if(use_fast_trellis) wubu_trellis_quantize_fast(coeffs4,64,qstep8,lambda,levels4);
+                    else wubu_trellis_quantize(coeffs4,64,qstep8,lambda,levels4);
                     int16_t dq4[64];
                     for(int i=0;i<64;i++) dq4[i]=(int16_t)(levels4[i]*qstep8);
                     int16_t recon4[64]={0};

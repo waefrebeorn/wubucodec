@@ -39,7 +39,7 @@ int main(void){
         }
     }
     
-    const char* preset_names[] = {"ultrafast", "fast", "medium", "slow"};
+    const char* preset_names[] = {"superfast", "ultrafast", "fast", "medium", "slow"};
     
     printf("=== WuBuCodec Preset Benchmark ===\n");
     printf("Content: %dx%d, %d frames, motion+texture\n\n", W, H, NF);
@@ -48,7 +48,7 @@ int main(void){
     printf("%-10s %8s %10s %8s %10s\n", "Preset", "fps", "kbps", "PSNR", "bits/frame");
     printf("%-10s %8s %10s %8s %10s\n", "------", "---", "----", "----", "-----------");
     
-    for(int preset = 0; preset < 4; preset++){
+    for(int preset = 0; preset < 5; preset++){
         int qp = 26;
         uint8_t* recon = malloc(np);
         uint8_t* ref = malloc(np);
@@ -92,7 +92,7 @@ int main(void){
     
     /* I-frame benchmark across presets */
     printf("\n=== I-frame only ===\n");
-    for(int preset = 0; preset < 4; preset++){
+    for(int preset = 0; preset < 5; preset++){
         int qp = 26;
         uint8_t* recon = malloc(np);
         clock_t start = clock();

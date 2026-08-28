@@ -21,15 +21,79 @@ Exit: trellis-RDOQ must beat or match rounding-based quantization on SSE+λ·bit
 #include <math.h>
 
 /* bits needed to code a nonzero coefficient value */
+/* Uses clz for speed */
 int tr_bits_for_level(int level){
-    /* Matches exp-Golomb cost: code=(s>0?2s-1:-2s), bits=2*floor(log2(code+1))+1 */
+    if(level == 0) return 0;
     int s = level;
     unsigned code = (s > 0) ? (unsigned)(2*s - 1) : (unsigned)(-2*s);
-    int k = 0;
-    unsigned v1 = code + 1;
-    while ((v1 >> (k + 1)) && k < 30) k++;
+    int k = 31 - __builtin_clz(code + 1);
     return 2*k + 1;
 }
+
+/* Fast trellize: skip RDOQ for coefficients that will clearly round to zero */
+double wubu_trellis_quantize_fast(const double* coeffs,int n_coeffs,
+                              double qstep,double lambda,
+                              int16_t* output_levels){
+    if(n_coeffs<=0||!coeffs||!output_levels)return 0;
+    
+    double total_rd=0.0;
+    
+    /* Threshold: if |coeff| < qstep/2, it rounds to zero — skip RDOQ */
+    double half_q = qstep * 0.5;
+    double rdoq_threshold = qstep * 1.5; /* only do full RDOQ for larger coeffs */
+    
+    for(int i=0;i<n_coeffs;i++){
+        double c=coeffs[i];
+        double abs_c = fabs(c);
+        
+        if(abs_c < half_q){
+            /* Clearly rounds to zero — no RDOQ needed */
+            output_levels[i] = 0;
+            total_rd += c*c; /* distortion = coefficient squared */
+            continue;
+        }
+        
+        if(abs_c < rdoq_threshold){
+            /* Fast path: just round, no RDOQ candidates */
+            int level = (int)floor(c / qstep + (c >= 0.0 ? 0.5 : -0.5));
+            output_levels[i] = (int16_t)level;
+            double recon = (double)level * qstep;
+            double d = c - recon;
+            int bits = (level != 0) ? tr_bits_for_level(level) : 0;
+            total_rd += d*d + lambda * bits;
+            continue;
+        }
+        
+        /* Full RDOQ for significant coefficients */
+        double q=c/qstep;
+        int16_t candidates[3];
+        int nc=0;
+        candidates[nc++]=0;
+        int fl=(int)floor(q);
+        int ce=(int)ceil(q);
+        if(fl!=0)candidates[nc++]=fl;
+        if(ce!=fl&&ce!=0)candidates[nc++]=ce;
+        
+        double best_rd=1e18;
+        int best_c=0;
+        for(int j=0;j<nc;j++){
+            int level=candidates[j];
+            double recon=(double)level*qstep;
+            double d=c-recon;
+            int bits=(level!=0)?tr_bits_for_level(level):0;
+            double rd=d*d+lambda*(double)bits;
+            if(rd<best_rd){
+                best_rd=rd;
+                best_c=j;
+            }
+        }
+        output_levels[i]=candidates[best_c];
+        total_rd+=best_rd;
+    }
+    return total_rd;
+}
+
+/* Original full trellis for quality-critical paths */
 
 /* distortion of coding original value x as level l */
 static double tr_distortion(double coeff,double qstep,int level){
