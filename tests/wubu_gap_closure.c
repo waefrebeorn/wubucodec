@@ -198,16 +198,17 @@ int main(void) {
     uint8_t* frames = malloc((size_t)NF * np);
     uint8_t* recon = malloc((size_t)NF * np);
     
-    /* Generate test content: very heavy film grain for B-frame averaging */
+    /* Generate test content: film grain for B-frame averaging gain */
+    /* Key: bi-prediction averages two noisy refs → cleaner prediction */
     for (int i = 0; i < NF; i++) {
         srand(i * 7777); /* deterministic per-frame seed */
         for (int y = 0; y < H; y++) {
             for (int x = 0; x < W; x++) {
-                /* Static base pattern */
+                /* Static base pattern: same every frame */
                 float v = 128.0f;
                 v += 20.0f * sinf(2.0f * M_PI * 4.0f * x / W) * cosf(2.0f * M_PI * 4.0f * y / H);
-                /* Very heavy film grain: large random noise */
-                v += (float)((rand() % 100) - 50);
+                /* Film grain: per-frame random noise (different each frame) */
+                v += (float)((rand() % 60) - 30);
                 if (v < 0) v = 0; if (v > 255) v = 255;
                 frames[(size_t)i * np + y * W + x] = (uint8_t)v;
             }
