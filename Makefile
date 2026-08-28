@@ -46,6 +46,7 @@ CODEC_SRCS = $(SRC)/codec/wubu_encoder.c \
              $(SRC)/container/wubuv2.c \
              $(SRC)/quality/wubu_bench_quality.c \
              $(SRC)/quality/wubu_ssim.c \
+             $(SRC)/quality/wubu_satd.c \
              $(SRC)/neural/wubu_learned_codec.c \
              $(SRC)/neural/wubu_latent_codec.c \
              $(SRC)/quat/wubu_quat_codec.c \

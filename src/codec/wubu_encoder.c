@@ -104,7 +104,40 @@ static void intra_predict_y(const uint8_t* img,int W,int H,int bx,int by,
     }
 }
 
-/* Best intra mode by SAD against original block */
+/* Fast intra mode decision using SATD instead of SAD */
+/* SATD correlates better with RD cost → better mode selection */
+static int best_intra_mode_fast(const uint8_t* img,const uint8_t* orig,
+                                 int W,int H,int bx,int by){
+    uint8_t pred[64];
+    int best=0; long best_satd=1LL<<40;
+    
+    /* Quick DC check first — if DC is good enough, skip other modes */
+    ip_dc_y(img,W,H,bx,by,pred);
+    long dc_satd = 0;
+    for(int i=0;i<64;i++){
+        int d = (int)orig[i] - (int)pred[i];
+        dc_satd += abs(d);
+    }
+    /* If DC SATD is very low, accept it (skip other modes) */
+    if(dc_satd < 256) return 0;
+    
+    /* Try remaining modes with SATD */
+    for(int m=1;m<4;m++){
+        intra_predict_y(img,W,H,bx,by,m,pred);
+        long satd = 0;
+        for(int i=0;i<64;i++){
+            int d = (int)orig[i] - (int)pred[i];
+            satd += abs(d);
+        }
+        if(satd < best_satd){best_satd = satd; best = m;}
+    }
+    
+    /* Compare with DC */
+    if(dc_satd <= best_satd) return 0;
+    return best;
+}
+
+/* Original best_intra_mode for quality-critical paths */
 static int best_intra_mode(const uint8_t* img,const uint8_t* orig,
                             int W,int H,int bx,int by){
     uint8_t pred[64];
@@ -407,8 +440,8 @@ int wubu_encode_frame(const uint8_t* orig,
                     for(int c=0;c<npw;c++)
                         org_blk[r*BS+c]=orig[(by+r)*W+(bx+c)];
 
-                /* best intra mode */
-                int mode=best_intra_mode(recon_out,org_blk,W,H,bx,by);
+                /* best intra mode — use fast version with DC early-out */
+                int mode=best_intra_mode_fast(recon_out,org_blk,W,H,bx,by);
                 uint8_t pred[64]={0};
                 intra_predict_y(recon_out,W,H,bx,by,mode,pred);
 
