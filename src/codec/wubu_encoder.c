@@ -1064,13 +1064,63 @@ int wubu_encode_frame_preset(const uint8_t* orig,
                 continue;
             }
             
-            /* P/B-frame */
-            uint8_t pred[64]={0};
-            uint8_t org_blk[64]={0};
-            for(int r=0;r<nph;r++)
-                for(int c=0;c<npw;c++)
-                    org_blk[r*BS+c]=orig[(by+r)*W+(bx+c)];
+            /* P/B-frame: fast path for common case (P-frame) */
+            if(frame_type != WUBU_B_FRAME && ref_past){
+                /* Fast P-frame path: MC from past ref with MV */
+                uint8_t pred[64]={0};
+                int mvx=0,mvy=0;
+                if(mvs){
+                    int idx=by/BS*nbx+bx/BS;
+                    if(idx>=0&&idx<nbx*nby){
+                        mvx=mvs[idx*2];
+                        mvy=mvs[idx*2+1];
+                    }
+                }
+                mc_pred(ref_past,W,H,mvx,mvy,bx,by,pred);
+                
+                /* Residual */
+                uint8_t org_blk[64]={0};
+                for(int r=0;r<nph;r++)
+                    for(int c=0;c<npw;c++)
+                        org_blk[r*BS+c]=orig[(by+r)*W+(bx+c)];
+                
+                int16_t res[64]={0};
+                for(int i=0;i<npw*nph;i++)
+                    res[i]=(int16_t)((int)org_blk[i]-(int)pred[i]);
+                
+                /* DCT */
+                int16_t coeffs[64]={0};
+                wubu_tr_forward(res,coeffs,BS);
+                
+                /* Quantization */
+                int qshift = eff_qp / 2;
+                if(qshift < 1) qshift = 1;
+                int qstep = qshift + 1;
+                int16_t levels[64];
+                for(int i=0;i<64;i++) levels[i] = (int16_t)(coeffs[i] / qstep);
+                
+                /* IDCT */
+                int16_t dq[64], recon_blk[64];
+                for(int i=0;i<64;i++) dq[i] = (int16_t)(levels[i] * qstep);
+                wubu_tr_inverse(dq, recon_blk, BS);
+                
+                /* Bitstream + reconstruction */
+                int bits=0;
+                for(int i=0;i<64;i++)
+                    if(levels[i]!=0) bits+=eg_bits(levels[i]);
+                *total_bits+=bits+4;
+                
+                for(int r=0;r<nph;r++)
+                    for(int c=0;c<npw;c++){
+                        int val=recon_blk[r*BS+c]+pred[r*BS+c];
+                        if(val<0)val=0; if(val>255)val=255;
+                        recon_out[(by+r)*W+(bx+c)]=(uint8_t)val;
+                    }
+                continue;
+            }
             
+            /* Slow path: B-frame or VBS */
+            uint8_t pred[64]={0};
             if(frame_type==WUBU_B_FRAME && ref_past && ref_future && p->enable_bframe_me){
                 uint8_t pred_p[64]={0}, pred_b[64]={0};
                 
@@ -1121,6 +1171,12 @@ int wubu_encode_frame_preset(const uint8_t* orig,
             }else{
                 inter_pred_plane(NULL,W,H,bx,by,pred);
             }
+            
+            /* Extract block for residual */
+            uint8_t org_blk[64]={0};
+            for(int r=0;r<nph;r++)
+                for(int c=0;c<npw;c++)
+                    org_blk[r*BS+c]=orig[(by+r)*W+(bx+c)];
             
             int16_t res[64]={0};
             for(int i=0;i<npw*nph;i++)
