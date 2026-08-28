@@ -99,7 +99,8 @@ CODEC_SRCS = $(SRC)/codec/wubu_encoder.c \
              $(SRC)/math/wubu_q_controller.c \
              $(SRC)/math/wubu_loss.c \
              $(SRC)/math/wubu_ratecontrol.c \
-             $(SRC)/math/wubu_frame_parallel.c
+             $(SRC)/math/wubu_frame_parallel.c \
+             $(SRC)/math/wubu_tile_parallel.c
 
 CODEC_OBJS = $(patsubst $(SRC)/%.c,$(OBJ)/%.o,$(CODEC_SRCS))
 
@@ -163,6 +164,9 @@ test-1080p: $(BIN)/wubu_1080p_bench
 
 test-8k: $(BIN)/wubu_8k_bench
 	./$(BIN)/wubu_8k_bench
+
+test-tile: $(BIN)/wubu_tile_bench
+	./$(BIN)/wubu_tile_bench
 
 # Clean
 clean:
