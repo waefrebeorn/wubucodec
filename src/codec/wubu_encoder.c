@@ -265,63 +265,26 @@ int wubu_encode_frame(const uint8_t* orig,
                     org_blk[r*BS+c]=orig[(by+r)*W+(bx+c)];
 
             if(frame_type==WUBU_B_FRAME&&ref_past&&ref_future){
-                /* C7: Mode decision — try P vs B, pick best RD cost */
-                /* P-frame prediction: from past ref only */
-                uint8_t pred_p[64]={0};
-                int mvx_p=0,mvy_p=0;
-                if(mvs){
-                    int idx=by/BS*(W/BS)+bx/BS;
-                    if(idx>=0&&idx<(W/BS)*(H/BS)){
-                        mvx_p=mvs[idx*2];
-                        mvy_p=mvs[idx*2+1];
-                    }
-                }
-                mc_pred(ref_past,W,H,mvx_p,mvy_p,bx,by,pred_p);
-                
-                /* B-frame prediction: MC bi-prediction from past + future */
+                /* C7: Proper bi-prediction with separate MV search for each reference */
                 uint8_t p_past[64]={0}, p_future[64]={0};
                 int mvx_past=0,mvy_past=0,mvx_future=0,mvy_future=0;
                 
-                /* Compute MVs for both references */
-                if(mvs){
-                    int idx=by/BS*(W/BS)+bx/BS;
-                    if(idx>=0&&idx<(W/BS)*(H/BS)){
-                        mvx_past=mvs[idx*2];
-                        mvy_past=mvs[idx*2+1];
-                        mvx_future=-mvx_past;
-                        mvy_future=-mvy_past;
-                    }
-                }else{
-                    int dx,dy;
-                    wubu_me_block(org_blk,ref_past,W,H,bx,by,BS,8,&dx,&dy);
-                    mvx_past=dx; mvy_past=dy;
-                    mvx_future=-dx; mvy_future=-dy;
-                }
+                /* Search for best MV in past reference (list0) */
+                int dx_past, dy_past;
+                wubu_me_block(org_blk,ref_past,W,H,bx,by,BS,12,&dx_past,&dy_past);
+                mvx_past=dx_past; mvy_past=dy_past;
                 
+                /* Search for best MV in future reference (list1) */
+                int dx_future, dy_future;
+                wubu_me_block(org_blk,ref_future,W,H,bx,by,BS,12,&dx_future,&dy_future);
+                mvx_future=dx_future; mvy_future=dy_future;
+                
+                /* Motion compensate from both references with separate MVs */
                 mc_pred(ref_past,W,H,mvx_past,mvy_past,bx,by,p_past);
                 mc_pred(ref_future,W,H,mvx_future,mvy_future,bx,by,p_future);
-                uint8_t pred_b[64]={0};
-                wubu_bp_weighted(p_past,p_future,pred_b,npw*nph,1,1,2);
                 
-                /* Compute RD cost for both modes and pick best */
-                long sse_p=0, sse_b=0;
-                for(int i=0;i<npw*nph;i++){
-                    int d_p=org_blk[i]-pred_p[i];
-                    int d_b=org_blk[i]-pred_b[i];
-                    sse_p+=d_p*d_p;
-                    sse_b+=d_b*d_b;
-                }
-                /* B-frames cost ~1 bit more for the bi-pred flag */
-                double rd_p=(double)sse_p+lambda*1;
-                double rd_b=(double)sse_b+lambda*2;
-                
-                if(rd_b<rd_p){
-                    /* B-frame wins */
-                    for(int i=0;i<npw*nph;i++) pred[i]=pred_b[i];
-                }else{
-                    /* P-frame wins */
-                    for(int i=0;i<npw*nph;i++) pred[i]=pred_p[i];
-                }
+                /* Weighted bi-prediction (1:1 average) */
+                wubu_bp_weighted(p_past,p_future,pred,npw*nph,1,1,2);
             }else if(ref_past){
                 /* P-frame: MC from past ref with MV */
                 int mvx=0,mvy=0;
