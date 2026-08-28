@@ -477,12 +477,12 @@ int wubu_encode_frame(const uint8_t* orig,
                 
                 /* Search for best MV in past reference (list0) */
                 int dx_past, dy_past;
-                wubu_me_block_fast(orig,ref_past,W,H,bx,by,BS,12,&dx_past,&dy_past,mvs,nbx);
+                int sse_past = wubu_me_block_fast(orig,ref_past,W,H,bx,by,BS,12,&dx_past,&dy_past,mvs,nbx);
                 mvx_past=dx_past; mvy_past=dy_past;
                 
                 /* Search for best MV in future reference (list1) */
                 int dx_future, dy_future;
-                wubu_me_block_fast(orig,ref_future,W,H,bx,by,BS,12,&dx_future,&dy_future,mvs,nbx);
+                int sse_future = wubu_me_block_fast(orig,ref_future,W,H,bx,by,BS,12,&dx_future,&dy_future,mvs,nbx);
                 mvx_future=dx_future; mvy_future=dy_future;
                 
                 /* Motion compensate from both references with separate MVs */

@@ -3,7 +3,7 @@
 
 CC = gcc
 CFLAGS = -std=c11 -O3 -march=native -Iinclude -w
-LDFLAGS = -lm -lpthread -lz
+LDFLAGS = -lm -lpthread -lz -fopenmp
 
 SRC = src
 INC = include

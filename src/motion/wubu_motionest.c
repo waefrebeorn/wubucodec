@@ -159,12 +159,15 @@ int wubu_me_frame(const uint8_t* curr,const uint8_t* ref,
                    int* out_mvs /* [n_blocks_x*n_blocks_y][2], in quarter-pel units */){
     int nbx=W/bs,nby=H/bs;
     int count=0;
+    /* Use OpenMP for large frames only (overhead dominates for small frames) */
+    #pragma omp parallel for schedule(dynamic, 4) if(nbx*nby > 64)
     for(int by=0;by<nby;by++)
         for(int bx=0;bx<nbx;bx++){
             int dx,dy;
             wubu_me_block(curr,ref,W,H,bx*bs,by*bs,bs,search_range,&dx,&dy);
-            out_mvs[count*2]=dx;
-            out_mvs[count*2+1]=dy;
+            int idx = by*nbx+bx;
+            out_mvs[idx*2]=dx;
+            out_mvs[idx*2+1]=dy;
             count++;
         }
     return count;
