@@ -218,7 +218,7 @@ int main(void) {
     /* ===== C7: B-frame structure ===== */
     printf("--- C7: B-Frame Structure ---\n");
     {
-        /* Use content where B-frames help: high spatial complexity + motion */
+        /* Use content where B-frames help: high complexity + motion */
         /* Create frames with significant detail and motion */
         uint8_t* f0 = malloc(np);
         uint8_t* f1 = malloc(np);
