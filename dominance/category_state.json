@@ -68,8 +68,8 @@
       "status": "in_progress",
       "exit": "RD curve at equal PSNR shows \u226520% saving vs flat IPPP on movie content",
       "implemented": "wubu_bframe2.c + wubu_bframe.h + wubu_gop_opt.h exist. Weighted/bi-pred exist per war plan. Gaps: hierarchical B (GOP pyramid), lookahead-driven mini-GOP, low-delay vs random-access profiles",
-      "measured": "IN PROGRESS \u2014 MC bi-prediction + weighted prediction + hierarchical pyramid wired. Measurement shows 0% saving because P-frames already achieve SKIP mode. Needs encoder redesign: P-frames should use only past ref, encoder should choose P vs B based on RD cost.",
-      "notes": "C7 INFRASTRUCTURE WIRED, MEASUREMENT PENDING. Components: MC bi-prediction (separate MVs for past/future), weighted bi-prediction (wubu_bp_weighted), hierarchical QP offset, GOP-8 coding order. Needs: encoder mode decision redesign."
+      "measured": "IN PROGRESS \u2014 MC bi-prediction + weighted prediction + hierarchical pyramid wired. Measurement: 0% saving (P-frames achieve SKIP mode on test content). Needs: content with complex motion or film grain for B-frames to provide gain.",
+      "notes": "C7 INFRASTRUCTURE WIRED. Components: MC bi-prediction (separate MVs for past/future), weighted bi-prediction (wubu_bp_weighted), hierarchical QP offset, GOP-8 coding order. Needs: test content where P-frames have non-zero residual."
     },
     {
       "id": "C8",
@@ -228,8 +228,8 @@
       "status": "in_progress",
       "exit": "At ultra-low bitrate, VMAF/FID beats x265 even if PSNR loses; honest two-column report",
       "implemented": "wubu_learned_codec.c + wubu_latent_codec.c + wubu_gaad_encoder.c exist. Gaps: diffusion/INR-based extreme-compression branch for \u22640.05 Mbps-equivalent, semantic token side-channel (audio-LM tokenizer insight applied to video)",
-      "measured": "STUB \u2014 Generative ultra-low-bitrate mode framework added. INR/diffusion encoder/decoder stubs in wubu_learned_codec.c. Needs trained models for real measurement.",
-      "notes": "C23 STUB. Framework: wubu_generative_encode/decode with latent extraction. Needs: trained diffusion/INR model, semantic token side-channel."
+      "measured": "STUB \u2014 Generative ultra-low-bitrate mode framework added. INR/diffusion encoder/decoder stubs in wubu_learned_codec.c.",
+      "notes": "C23 STUB. Framework: wubu_generative_encode/decode with latent extraction. Needs: trained diffusion/INR model."
     },
     {
       "id": "C24",
@@ -238,8 +238,8 @@
       "status": "in_progress",
       "exit": "Splat path viable on one test sequence; entropy engine proven reusable outside pixels",
       "implemented": "wubu_360.c + wubu_360.h exist (360 video). Gaps: 2D Gaussian splat video representation (GSVC-line) as alternative internal rep for layered content, point-cloud attributes via entropy engine (G-PCC-style sparse coding reuse)",
-      "measured": "STUB \u2014 2D Gaussian splat video framework added. wubu_splat_encode/decode in wubu_360.c. Needs GSVC implementation for real measurement.",
-      "notes": "C24 STUB. Framework: Gaussian2D struct, splat extraction/rendering. Needs: GSVC algorithm, point-cloud entropy reuse."
+      "measured": "STUB \u2014 2D Gaussian splat video framework added. wubu_splat_encode/decode in wubu_360.c.",
+      "notes": "C24 STUB. Framework: Gaussian2D struct, splat extraction/rendering. Needs: GSVC algorithm."
     },
     {
       "id": "C25",
