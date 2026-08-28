@@ -930,3 +930,51 @@ float wubu_learned_compression_ratio(WubuLearnedCodec* codec) {
     float comp = (float)(codec->config.latent_dim * codec->config.quant_bits) / 8.0f;
     return raw / comp;
 }
+
+
+/* ===== C23: Generative Ultra-Low-Bitrate Mode ===== */
+/* Stub for INR/diffusion-based extreme compression branch */
+
+int wubu_generative_encode(const uint8_t* frame, int W, int H, 
+                            uint8_t* bitstream, int max_bits,
+                            float* latent_out, int latent_dim) {
+    /* TODO: Implement INR/diffusion encoder */
+    /* For now: simple DCT-based latent extraction */
+    if (!frame || !latent_out) return -1;
+    
+    /* Extract low-frequency DCT coefficients as latent */
+    int bx, by, i = 0;
+    for (by = 0; by < H; by += 8) {
+        for (bx = 0; bx < W; bx += 8) {
+            if (i >= latent_dim) break;
+            /* Average 8x8 block as latent value */
+            int sum = 0, cnt = 0;
+            for (int y = 0; y < 8 && by+y < H; y++)
+                for (int x = 0; x < 8 && bx+x < W; x++) {
+                    sum += frame[(by+y)*W + bx+x];
+                    cnt++;
+                }
+            latent_out[i++] = cnt > 0 ? (float)sum / cnt : 128.0f;
+        }
+    }
+    return i; /* latent dimension used */
+}
+
+int wubu_generative_decode(const float* latent, int latent_dim,
+                            uint8_t* frame, int W, int H) {
+    /* TODO: Implement INR/diffusion decoder */
+    /* For now: simple upsampling from latent grid */
+    if (!latent || !frame) return -1;
+    
+    int grid_w = (W + 7) / 8;
+    for (int y = 0; y < H; y++) {
+        for (int x = 0; x < W; x++) {
+            int bx = x / 8;
+            int by = y / 8;
+            int idx = by * grid_w + bx;
+            if (idx < latent_dim)
+                frame[y*W + x] = (uint8_t)(latent[idx] < 0 ? 0 : (latent[idx] > 255 ? 255 : latent[idx]));
+        }
+    }
+    return 0;
+}

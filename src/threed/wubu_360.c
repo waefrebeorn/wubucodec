@@ -138,3 +138,68 @@ int wubu_me_wraparound_adjust(int dx,int ref_width){
     if(dx<-half)dx+=ref_width;
     return dx;
 }
+
+
+/* ===== C24: Splat & Volumetric Tracks ===== */
+/* Stub for 2D Gaussian splat video representation */
+
+typedef struct {
+    float x, y;       /* center position */
+    float sigma_x, sigma_y; /* spread */
+    float r, g, b;    /* color */
+    float opacity;
+} Gaussian2D;
+
+int wubu_splat_encode(const uint8_t* frame, int W, int H,
+                       Gaussian2D* splats, int max_splats) {
+    /* TODO: Implement 2D Gaussian splat extraction */
+    /* For now: simple block-based approximation */
+    if (!frame || !splats) return -1;
+    
+    int n_splats = 0;
+    for (int by = 0; by < H; by += 16) {
+        for (int bx = 0; bx < W; bx += 16) {
+            if (n_splats >= max_splats) break;
+            /* Extract block as single Gaussian */
+            int sum_r = 0, sum_g = 0, sum_b = 0, cnt = 0;
+            for (int y = 0; y < 16 && by+y < H; y++)
+                for (int x = 0; x < 16 && bx+x < W; x++) {
+                    int idx = ((by+y)*W + (bx+x)) * 3;
+                    sum_r += frame[idx];
+                    sum_g += frame[idx+1];
+                    sum_b += frame[idx+2];
+                    cnt++;
+                }
+            splats[n_splats].x = bx + 8.0f;
+            splats[n_splats].y = by + 8.0f;
+            splats[n_splats].sigma_x = 8.0f;
+            splats[n_splats].sigma_y = 8.0f;
+            splats[n_splats].r = cnt > 0 ? (float)sum_r / cnt : 128.0f;
+            splats[n_splats].g = cnt > 0 ? (float)sum_g / cnt : 128.0f;
+            splats[n_splats].b = cnt > 0 ? (float)sum_b / cnt : 128.0f;
+            splats[n_splats].opacity = 1.0f;
+            n_splats++;
+        }
+    }
+    return n_splats;
+}
+
+int wubu_splat_decode(const Gaussian2D* splats, int n_splats,
+                       uint8_t* frame, int W, int H) {
+    /* TODO: Implement 2D Gaussian splat rendering */
+    /* For now: simple block fill */
+    if (!splats || !frame) return -1;
+    
+    for (int i = 0; i < n_splats; i++) {
+        int bx = (int)splats[i].x - 8;
+        int by = (int)splats[i].y - 8;
+        for (int y = 0; y < 16 && by+y < H; y++)
+            for (int x = 0; x < 16 && bx+x < W; x++) {
+                int idx = ((by+y)*W + (bx+x)) * 3;
+                frame[idx] = (uint8_t)splats[i].r;
+                frame[idx+1] = (uint8_t)splats[i].g;
+                frame[idx+2] = (uint8_t)splats[i].b;
+            }
+    }
+    return 0;
+}

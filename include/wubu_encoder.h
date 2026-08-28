@@ -33,6 +33,10 @@ int wubu_rd_curve(const uint8_t* orig,
                    const int16_t* mv_grid,
                    RdCurvePoint* curve);
 
+/* C7: Encode a GOP-8 with hierarchical B-frame structure */
+int wubu_encode_gop8(const uint8_t* frames,int W,int H,int base_qp,
+                      uint8_t* recon_frames,long* total_bits);
+
 #ifdef __cplusplus
 }
 #endif

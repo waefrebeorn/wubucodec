@@ -259,12 +259,33 @@ int wubu_encode_frame(const uint8_t* orig,
             uint8_t pred[64]={0};
 
             if(frame_type==WUBU_B_FRAME&&ref_past&&ref_future){
-                /* bi-pred: average past + future */
+                /* C7: MC bi-prediction from past + future with separate MVs */
                 uint8_t p_past[64]={0}, p_future[64]={0};
-                inter_pred_plane(ref_past,W,H,bx,by,p_past);
-                inter_pred_plane(ref_future,W,H,bx,by,p_future);
-                for(int i=0;i<npw*nph;i++)
-                    pred[i]=(uint8_t)((p_past[i]+p_future[i]+1)>>1);
+                int mvx_past=0,mvy_past=0,mvx_future=0,mvy_future=0;
+                
+                /* Compute MVs for both references if not provided */
+                if(mvs){
+                    int idx=by/BS*(W/BS)+bx/BS;
+                    if(idx>=0&&idx<(W/BS)*(H/BS)){
+                        mvx_past=mvs[idx*2];
+                        mvy_past=mvs[idx*2+1];
+                        /* For future ref, negate the MV (symmetric motion assumption) */
+                        mvx_future=-mvx_past;
+                        mvy_future=-mvy_past;
+                    }
+                }else{
+                    /* Search for best MV in past reference */
+                    int dx,dy;
+                    wubu_me_block(orig,ref_past,W,H,bx,by,BS,8,&dx,&dy);
+                    mvx_past=dx; mvy_past=dy;
+                    mvx_future=-dx; mvy_future=-dy;
+                }
+                
+                /* Motion compensate from both references */
+                mc_pred(ref_past,W,H,mvx_past,mvy_past,bx,by,p_past);
+                mc_pred(ref_future,W,H,mvx_future,mvy_future,bx,by,p_future);
+                /* Weighted bi-prediction (from wubu_bframe2.h) */
+                wubu_bp_weighted(p_past,p_future,pred,npw*nph,1,1,2);
             }else if(ref_past){
                 /* P-frame: MC from past ref with MV */
                 int mvx=0,mvy=0;
@@ -461,6 +482,96 @@ int wubu_encode_frame(const uint8_t* orig,
     }
 
     if(computed_mv) free(computed_mv);
+    return 0;
+}
+
+/* ===== C7: Hierarchical B-frame pyramid ===== */
+
+/* QP offset per temporal layer (higher layers get coarser quant) */
+static int hier_qp_offset(int temporal_layer){
+    /* Layer 0 (I/P): no offset. Layer 1: +2. Layer 2: +4. Layer 3: +6. */
+    return temporal_layer * 2;
+}
+
+/* Get the frame type for a position in GOP-8 structure */
+static wubu_frame_type_t gop8_frame_type(int display_pos){
+    switch(display_pos){
+        case 0: return WUBU_I_FRAME;
+        case 8: return WUBU_P_FRAME;
+        default: return WUBU_B_FRAME;
+    }
+}
+
+/* GOP-8 coding order: I(0), B(4), B(2), b(1), b(3), B(6), b(5), b(7), P(8) */
+static const int gop8_coding_order[9] = {0, 4, 2, 1, 3, 6, 5, 7, 8};
+
+/* Temporal layer for each position in GOP-8 */
+static int gop8_temporal_layer(int display_pos){
+    switch(display_pos){
+        case 0: return 0; /* I */
+        case 8: return 0; /* P */
+        case 4: return 1; /* B (middle) */
+        case 2: case 6: return 2; /* B */
+        case 1: case 3: case 5: case 7: return 3; /* b */
+        default: return 0;
+    }
+}
+
+/* Encode a GOP-8 with hierarchical B-frame structure */
+int wubu_encode_gop8(const uint8_t* frames,int W,int H,int base_qp,
+                      uint8_t* recon_frames,long* total_bits){
+    if(!frames||!recon_frames||!total_bits) return -1;
+    *total_bits=0;
+    int np=W*H;
+    
+    /* Encode in coding order */
+    for(int coding_idx=0;coding_idx<9;coding_idx++){
+        int display_pos=gop8_coding_order[coding_idx];
+        wubu_frame_type_t ft=gop8_frame_type(display_pos);
+        int tl=gop8_temporal_layer(display_pos);
+        int qp=base_qp+hier_qp_offset(tl);
+        
+        const uint8_t* orig=frames+(size_t)display_pos*np;
+        uint8_t* recon=recon_frames+(size_t)display_pos*np;
+        
+        const uint8_t* ref_past=NULL;
+        const uint8_t* ref_future=NULL;
+        
+        if(ft==WUBU_B_FRAME){
+            /* B-frames: use nearest original frames as references */
+            /* Find nearest non-B frame in the past */
+            for(int i=display_pos-1;i>=0;i--){
+                if(gop8_frame_type(i)!=WUBU_B_FRAME){
+                    ref_past=frames+(size_t)i*np;
+                    break;
+                }
+            }
+            /* Find nearest non-B frame in the future */
+            for(int i=display_pos+1;i<9;i++){
+                if(gop8_frame_type(i)!=WUBU_B_FRAME){
+                    ref_future=frames+(size_t)i*np;
+                    break;
+                }
+            }
+            /* Fallback to original frame if no reference found */
+            if(!ref_past) ref_past=frames;
+            if(!ref_future) ref_future=frames+8*np;
+        }else if(ft==WUBU_P_FRAME){
+            /* P-frame: use nearest past reconstructed reference */
+            for(int i=display_pos-1;i>=0;i--){
+                if(gop8_frame_type(i)!=WUBU_B_FRAME){
+                    ref_past=recon_frames+(size_t)i*np;
+                    break;
+                }
+            }
+        }
+        /* I-frame: no references needed */
+        
+        long bits=0;
+        int rc=wubu_encode_frame(orig,ref_past,ref_future,W,H,qp,ft,NULL,recon,&bits);
+        if(rc!=0) return rc;
+        *total_bits+=bits;
+    }
     return 0;
 }
 
