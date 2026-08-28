@@ -1066,9 +1066,13 @@ int wubu_encode_frame_preset(const uint8_t* orig,
             
             /* P/B-frame: fast path for common case (P-frame) */
             if(frame_type != WUBU_B_FRAME && ref_past){
-                /* Fast P-frame path: MC from past ref with MV */
-                uint8_t pred[64]={0};
+                /* Ultra-fast P-frame path: inline MC + DCT + IDCT */
+                int16_t dq[64]; /* declare at block scope for later use */
+                int16_t res[64]; /* residual block */
                 int mvx=0,mvy=0;
+                
+                /* AAN DCT constants */
+                static const int C1 = 401, C2 = 378, C3 = 340, C5 = 251, C6 = 196, C7 = 98;
                 if(mvs){
                     int idx=by/BS*nbx+bx/BS;
                     if(idx>=0&&idx<nbx*nby){
@@ -1076,43 +1080,143 @@ int wubu_encode_frame_preset(const uint8_t* orig,
                         mvy=mvs[idx*2+1];
                     }
                 }
-                mc_pred(ref_past,W,H,mvx,mvy,bx,by,pred);
                 
-                /* Residual */
-                uint8_t org_blk[64]={0};
-                for(int r=0;r<nph;r++)
-                    for(int c=0;c<npw;c++)
-                        org_blk[r*BS+c]=orig[(by+r)*W+(bx+c)];
+                /* Inline MC: extract prediction block with sub-pel offset */
+                int fx = mvx / 4, fy = mvy / 4;
+                int dx = mvx - fx * 4, dy = mvy - fy * 4;
                 
-                int16_t res[64]={0};
-                for(int i=0;i<npw*nph;i++)
-                    res[i]=(int16_t)((int)org_blk[i]-(int)pred[i]);
+                uint8_t pred[64];
+                if(dx == 0 && dy == 0){
+                    /* Integer-pel: direct copy */
+                    for(int r=0;r<BS;r++)
+                        for(int c=0;c<BS;c++)
+                            pred[r*BS+c] = ref_past[(by*BS+r)*W + bx*BS+c];
+                }else{
+                    /* Half/quarter-pel: bilinear */
+                    for(int r=0;r<BS;r++)
+                        for(int c=0;c<BS;c++){
+                            int sy = by*BS+r+fy, sx = bx*BS+c+fx;
+                            if(sy<0||sy>=H-1||sx<0||sx>=W-1){pred[r*BS+c]=0;continue;}
+                            int v00=ref_past[sy*W+sx], v10=ref_past[sy*W+sx+1];
+                            int v01=ref_past[(sy+1)*W+sx], v11=ref_past[(sy+1)*W+sx+1];
+                            float v=v00*(4-dx)*(4-dy)/16.0f+v10*dx*(4-dy)/16.0f+v01*(4-dx)*dy/16.0f+v11*dx*dy/16.0f;
+                            pred[r*BS+c]=(uint8_t)(v<0?0:(v>255?255:(int)(v+0.5f)));
+                        }
+                }
                 
-                /* DCT */
-                int16_t coeffs[64]={0};
-                wubu_tr_forward(res,coeffs,BS);
-                
-                /* Quantization */
+                /* Inline residual + AAN DCT + quant + IDCT + reconstruction */
                 int qshift = eff_qp / 2;
                 if(qshift < 1) qshift = 1;
                 int qstep = qshift + 1;
-                int16_t levels[64];
-                for(int i=0;i<64;i++) levels[i] = (int16_t)(coeffs[i] / qstep);
                 
-                /* IDCT */
-                int16_t dq[64], recon_blk[64];
-                for(int i=0;i<64;i++) dq[i] = (int16_t)(levels[i] * qstep);
-                wubu_tr_inverse(dq, recon_blk, BS);
+                /* Process 8x8 block */
+                for(int r=0;r<BS;r++)
+                    for(int c=0;c<BS;c++){
+                        int val = (int)orig[(by+r)*W+bx+c] - (int)pred[r*BS+c];
+                        res[r*BS+c] = (int16_t)val;
+                    }
                 
-                /* Bitstream + reconstruction */
+                /* AAN DCT row pass */
+                int16_t tmp[64];
+                for(int y=0;y<8;y++){
+                    int16_t* row=res+y*8;
+                    int x0=row[0],x1=row[7],x2=row[1],x3=row[6],x4=row[2],x5=row[5],x6=row[3],x7=row[4];
+                    int a0=x0+x7,a1=x1+x6,a2=x2+x5,a3=x3+x4,a4=x3-x4,a5=x2-x5,a6=x1-x6,a7=x0-x7;
+                    int b0=a0+a3,b1=a1+a2,b2=a1-a2,b3=a0-a3;
+                    tmp[y*8+0]=(int16_t)((b0+b1)>>1);
+                    tmp[y*8+4]=(int16_t)((b0-b1)>>1);
+                    tmp[y*8+2]=(int16_t)((b2*C6+b3*C2)>>8);
+                    tmp[y*8+6]=(int16_t)((b3*C6-b2*C2)>>8);
+                    int c0=a4*C7+a7*C1,c1=a5*C3+a6*C5,c2=a5*C5-a6*C3,c3=a4*C1-a7*C7;
+                    tmp[y*8+1]=(int16_t)((c0+c1)>>8);
+                    tmp[y*8+3]=(int16_t)((c2+c3)>>8);
+                    tmp[y*8+5]=(int16_t)((c0-c1)>>8);
+                    tmp[y*8+7]=(int16_t)((c3-c2)>>8);
+                }
+                
+                /* AAN DCT column pass */
+                int16_t col[8],out_col[8];
+                for(int x=0;x<8;x++){
+                    for(int y=0;y<8;y++)col[y]=tmp[y*8+x];
+                    int x0=col[0],x1=col[7],x2=col[1],x3=col[6],x4=col[2],x5=col[5],x6=col[3],x7=col[4];
+                    int a0=x0+x7,a1=x1+x6,a2=x2+x5,a3=x3+x4,a4=x3-x4,a5=x2-x5,a6=x1-x6,a7=x0-x7;
+                    int b0=a0+a3,b1=a1+a2,b2=a1-a2,b3=a0-a3;
+                    out_col[0]=(int16_t)((b0+b1)>>1);
+                    out_col[4]=(int16_t)((b0-b1)>>1);
+                    out_col[2]=(int16_t)((b2*C6+b3*C2)>>8);
+                    out_col[6]=(int16_t)((b3*C6-b2*C2)>>8);
+                    int c0=a4*C7+a7*C1,c1=a5*C3+a6*C5,c2=a5*C5-a6*C3,c3=a4*C1-a7*C7;
+                    out_col[1]=(int16_t)((c0+c1)>>8);
+                    out_col[3]=(int16_t)((c2+c3)>>8);
+                    out_col[5]=(int16_t)((c0-c1)>>8);
+                    out_col[7]=(int16_t)((c3-c2)>>8);
+                    for(int y=0;y<8;y++)tmp[y*8+x]=out_col[y];
+                }
+                
+                /* Quantize + IDCT + reconstruct */
                 int bits=0;
-                for(int i=0;i<64;i++)
-                    if(levels[i]!=0) bits+=eg_bits(levels[i]);
-                *total_bits+=bits+4;
+                for(int i=0;i<64;i++){
+                    int16_t level = (int16_t)(tmp[i] / qstep);
+                    if(level != 0){
+                        /* Bit cost */
+                        int s = level;
+                        unsigned code = (s > 0) ? (unsigned)(2*s - 1) : (unsigned)(-2*s);
+                        int k = 31 - __builtin_clz(code + 1);
+                        bits += 2*k + 1;
+                    }
+                    dq[i] = (int16_t)(level * qstep);
+                }
+                *total_bits += bits + 4;
                 
-                for(int r=0;r<nph;r++)
-                    for(int c=0;c<npw;c++){
-                        int val=recon_blk[r*BS+c]+pred[r*BS+c];
+                /* IDCT (inverse of AAN DCT) */
+                for(int y=0;y<8;y++){
+                    int16_t* row=dq+y*8;
+                    int c0=row[0]+row[4],c1=row[0]-row[4];
+                    int c2=(row[2]*C6-row[6]*C2)>>8,c3=(row[6]*C6+row[2]*C2)>>8;
+                    int a0=c0+c3,a1=c1+c2,a2=c1-c2,a3=c0-c3;
+                    int b1=row[1]+row[7],b3=row[3]+row[5];
+                    int b5=row[1]-row[7],b7=row[3]-row[5];
+                    int d1=b1+b3,d3=b1-b3;
+                    int e1=(b5*C3+b7*C5)>>8,e3=(b5*C5-b7*C3)>>8;
+                    int e5=(b1*C7+b3*C1)>>8,e7=(b1*C1-b3*C7)>>8;
+                    int f1=e1+e5,f3=e3+e7,g1=e1-e5,g3=e3-e7;
+                    tmp[y*8+0]=(int16_t)((a0+d1)>>1);
+                    tmp[y*8+7]=(int16_t)((a0-d1)>>1);
+                    tmp[y*8+1]=(int16_t)((a1+f1)>>1);
+                    tmp[y*8+6]=(int16_t)((a1-f1)>>1);
+                    tmp[y*8+2]=(int16_t)((a2+f3)>>1);
+                    tmp[y*8+5]=(int16_t)((a2-f3)>>1);
+                    tmp[y*8+3]=(int16_t)((a3+g1)>>1);
+                    tmp[y*8+4]=(int16_t)((a3-g1)>>1);
+                }
+                
+                /* IDCT column pass */
+                for(int x=0;x<8;x++){
+                    for(int y=0;y<8;y++)col[y]=tmp[y*8+x];
+                    int c0=col[0]+col[4],c1=col[0]-col[4];
+                    int c2=(col[2]*C6-col[6]*C2)>>8,c3=(col[6]*C6+col[2]*C2)>>8;
+                    int a0=c0+c3,a1=c1+c2,a2=c1-c2,a3=c0-c3;
+                    int b1=col[1]+col[7],b3=col[3]+col[5];
+                    int b5=col[1]-col[7],b7=col[3]-col[5];
+                    int d1=b1+b3,d3=b1-b3;
+                    int e1=(b5*C3+b7*C5)>>8,e3=(b5*C5-b7*C3)>>8;
+                    int e5=(b1*C7+b3*C1)>>8,e7=(b1*C1-b3*C7)>>8;
+                    int f1=e1+e5,f3=e3+e7,g1=e1-e5,g3=e3-e7;
+                    out_col[0]=(int16_t)((a0+d1)>>1);
+                    out_col[7]=(int16_t)((a0-d1)>>1);
+                    out_col[1]=(int16_t)((a1+f1)>>1);
+                    out_col[6]=(int16_t)((a1-f1)>>1);
+                    out_col[2]=(int16_t)((a2+f3)>>1);
+                    out_col[5]=(int16_t)((a2-f3)>>1);
+                    out_col[3]=(int16_t)((a3+g1)>>1);
+                    out_col[4]=(int16_t)((a3-g1)>>1);
+                    for(int y=0;y<8;y++)tmp[y*8+x]=out_col[y];
+                }
+                
+                /* Reconstruct */
+                for(int r=0;r<BS;r++)
+                    for(int c=0;c<BS;c++){
+                        int val = pred[r*BS+c] + tmp[r*BS+c];
                         if(val<0)val=0; if(val>255)val=255;
                         recon_out[(by+r)*W+(bx+c)]=(uint8_t)val;
                     }
