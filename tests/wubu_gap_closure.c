@@ -198,20 +198,27 @@ int main(void) {
     uint8_t* frames = malloc((size_t)NF * np);
     uint8_t* recon = malloc((size_t)NF * np);
     
-    /* Generate test content: film grain for bi-prediction gain */
+    /* Generate test content: rotation + film grain for B-frame testing */
     for (int i = 0; i < NF; i++) {
         srand(i * 7777); /* deterministic per-frame seed */
+        float angle = 0.1f * i; /* rotation per frame */
         for (int y = 0; y < H; y++) {
             for (int x = 0; x < W; x++) {
-                /* Static base scene */
+                /* Inverse rotation to find source position */
+                float dx = x - W/2.0f;
+                float dy = y - H/2.0f;
+                float rx = dx * cosf(-angle) - dy * sinf(-angle);
+                float ry = dx * sinf(-angle) + dy * cosf(-angle);
+                int sx = ((int)rx + W) % W;
+                int sy = ((int)ry + H) % H;
+                
+                /* Pattern at source position */
                 float v = 128.0f;
-                /* Static object */
-                if (x >= 60 && x < 80 && y >= 50 && y < 70)
-                    v = 200.0f;
-                /* Static background detail */
-                v += 20.0f * sinf(2.0f * M_PI * 4.0f * x / W) * cosf(2.0f * M_PI * 4.0f * y / H);
-                /* Film grain: per-frame random noise */
-                v += (float)((rand() % 60) - 30);
+                v += 30.0f * sinf(2.0f * M_PI * 8.0f * sx / W) * cosf(2.0f * M_PI * 8.0f * sy / H);
+                v += 25.0f * sinf(2.0f * M_PI * 16.0f * sx / W + 0.5f * sy / H);
+                v += 20.0f * cosf(2.0f * M_PI * 20.0f * sy / H + 0.3f * sx / W);
+                /* Film grain */
+                v += (float)((rand() % 40) - 20);
                 if (v < 0) v = 0; if (v > 255) v = 255;
                 frames[(size_t)i * np + y * W + x] = (uint8_t)v;
             }
