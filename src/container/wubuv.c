@@ -163,9 +163,12 @@ int wubuv_writer_close(WubuvWriter* w){
     uint32_t crc=wubuv_crc32(all,(size_t)end);
     free(all);
     fwrite(&crc,4,1,w->f);
-    free(w->prev_frame);
+    if(w->prev_frame) {
+        free(w->prev_frame);
+        w->prev_frame = NULL;
+    }
     fclose(w->f);
-    free(w);
+    /* Don't free w here - caller owns the struct */
     return 0;
 }
 
