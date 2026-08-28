@@ -16,13 +16,14 @@ typedef struct {
 
 static void* encode_tile(void* arg){
     TileJob* job = (TileJob*)arg;
-    int np = job->W * (job->y_end - job->y_start);
+    int tile_h = job->y_end - job->y_start;
+    int np = job->W * tile_h;
     int y_offset = job->y_start * job->W;
     
     /* Encode this tile as a small frame */
     long bits = 0;
     wubu_encode_frame_preset(job->orig + y_offset, job->ref + y_offset, NULL,
-                              job->W, job->y_end - job->y_start, job->qp,
+                              job->W, tile_h, job->qp,
                               WUBU_I_FRAME, NULL, job->recon + y_offset, &bits, job->preset);
     *job->total_bits = bits;
     return NULL;

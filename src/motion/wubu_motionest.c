@@ -143,7 +143,7 @@ long wubu_me_block_hierarchical(const uint8_t* curr, const uint8_t* ref,
     int sr_ds = search_range / 2;
     if(sr_ds < 2) sr_ds = 2;
     
-    wubu_me_block(curr_ds, ref_ds, W2, H2, bx_ds, by_ds, bs_ds, sr_ds, &dx_coarse, &dy_coarse);
+    long coarse_sad = wubu_me_block(curr_ds, ref_ds, W2, H2, bx_ds, by_ds, bs_ds, sr_ds, &dx_coarse, &dy_coarse);
     
     free(curr_ds);
     free(ref_ds);
@@ -153,13 +153,19 @@ long wubu_me_block_hierarchical(const uint8_t* curr, const uint8_t* ref,
     int refine_dx = dx_coarse * 2;  /* Scale to full-res quarter-pel units */
     int refine_dy = dy_coarse * 2;
     
-    /* Search in a small window around the predicted MV */
+    /* Skip refinement for very flat blocks (coarse SAD is very low) */
+    if(coarse_sad < bs_ds * bs_ds * 4){
+        *out_dx = refine_dx;
+        *out_dy = refine_dy;
+        return coarse_sad;
+    }
+    
+    /* Small refinement search (±1 pixel around coarse) for speed */
     int best_dx = refine_dx, best_dy = refine_dy;
     long best_sad = wubu_me_sad(curr, ref, W, H, bx, by, bs, refine_dx, refine_dy);
     
-    /* Small refinement search (±2 pixels around coarse) */
-    for(int dy = -2; dy <= 2; dy++){
-        for(int dx = -2; dx <= 2; dx++){
+    for(int dy = -1; dy <= 1; dy++){
+        for(int dx = -1; dx <= 1; dx++){
             if(dx == 0 && dy == 0) continue;
             int ndx = refine_dx + dx;
             int ndy = refine_dy + dy;
