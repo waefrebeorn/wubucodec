@@ -161,6 +161,9 @@ test-preset: $(BIN)/wubu_preset_bench
 test-1080p: $(BIN)/wubu_1080p_bench
 	./$(BIN)/wubu_1080p_bench
 
+test-8k: $(BIN)/wubu_8k_bench
+	./$(BIN)/wubu_8k_bench
+
 # Clean
 clean:
 	rm -rf $(OBJ) $(BIN)
