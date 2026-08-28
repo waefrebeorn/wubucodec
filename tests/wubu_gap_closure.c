@@ -198,24 +198,25 @@ int main(void) {
     uint8_t* frames = malloc((size_t)NF * np);
     uint8_t* recon = malloc((size_t)NF * np);
     
-    /* Generate test content: sub-pixel motion + film grain for B-frame testing */
+    /* Generate test content: fine detail + sub-pixel motion + film grain */
     for (int i = 0; i < NF; i++) {
         srand(i * 7777); /* deterministic per-frame seed */
         for (int y = 0; y < H; y++) {
             for (int x = 0; x < W; x++) {
-                /* Sub-pixel motion: object moves 1.5 px/frame (integer ME fails) */
-                int sx = (int)(x - i * 1.5f);
-                while (sx < 0) sx += W;
-                while (sx >= W) sx -= W;
+                /* Sub-pixel motion: 1.5px/frame (integer ME can't match perfectly) */
+                float fx = x - i * 1.5f;
+                int sx = ((int)fx + W * 10) % W;
+                int sy = y;
                 
-                /* Object at source position */
+                /* Fine detail at source position */
                 float v = 128.0f;
-                if (sx >= 60 && sx < 80 && y >= 50 && y < 70)
-                    v = 200.0f;
-                /* Background detail */
-                v += 20.0f * sinf(2.0f * M_PI * 4.0f * sx / W) * cosf(2.0f * M_PI * 4.0f * y / H);
+                v += 30.0f * sinf(2.0f * M_PI * 8.0f * sx / W) * cosf(2.0f * M_PI * 8.0f * sy / H);
+                v += 25.0f * sinf(2.0f * M_PI * 16.0f * sx / W + 0.5f * sy / H);
+                v += 20.0f * cosf(2.0f * M_PI * 20.0f * sy / H + 0.3f * sx / W);
+                v += 15.0f * sinf(2.0f * M_PI * 24.0f * sx / W);
+                
                 /* Film grain */
-                v += (float)((rand() % 60) - 30);
+                v += (float)((rand() % 40) - 20);
                 if (v < 0) v = 0; if (v > 255) v = 255;
                 frames[(size_t)i * np + y * W + x] = (uint8_t)v;
             }
