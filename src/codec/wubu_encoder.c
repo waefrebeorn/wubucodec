@@ -467,10 +467,7 @@ int wubu_encode_frame(const uint8_t* orig,
             }
             double rd_res=(double)sse_res+lambda*bits;
 
-            /* For B-frames: force residual mode to enable bi-pred gain measurement */
-            int force_bframe_residual = (frame_type == WUBU_B_FRAME);
-            
-            if(rd_skip<rd_res && !force_bframe_residual){
+            if(rd_skip<rd_res){
                 /* SKIP mode: use prediction directly, no residual */
                 for(int r=0;r<nph;r++)
                     for(int c=0;c<npw;c++)
