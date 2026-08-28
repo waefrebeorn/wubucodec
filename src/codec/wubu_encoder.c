@@ -188,6 +188,69 @@ static void mc_pred(const uint8_t* ref,int W,int H,
     }
 }
 
+/* ===== Variable block size support ===== */
+
+/* Compute variance of a block to decide on block size */
+static long compute_block_variance(const uint8_t* img, int W, int H, int bx, int by, int bs){
+    long sum = 0, sum_sq = 0, n = 0;
+    for(int r = 0; r < bs; r++){
+        for(int c = 0; c < bs; c++){
+            int x = bx + c, y = by + r;
+            if(x >= W || y >= H) continue;
+            long v = img[y * W + x];
+            sum += v;
+            sum_sq += v * v;
+            n++;
+        }
+    }
+    if(n == 0) return 0;
+    long mean = sum / n;
+    return sum_sq / n - mean * mean;
+}
+
+/* Decide block size based on variance and position */
+/* Returns: 8 (small/detail), 16 (medium), or 32 (large/flat) */
+static int decide_block_size(const uint8_t* img, int W, int H, int bx, int by, int base_bs){
+    /* Only consider larger blocks at aligned positions */
+    if(bx % 16 != 0 || by % 16 != 0) return base_bs;
+    
+    long var = compute_block_variance(img, W, H, bx, by, 16);
+    
+    if(var < 64) return 32;   /* Very flat → large block */
+    if(var < 256) return 16;  /* Moderately flat → medium block */
+    return base_bs;           /* Detailed → small block */
+}
+
+/* Motion-compensated prediction for variable block sizes */
+static void mc_pred_variable(const uint8_t* ref, int W, int H,
+                              int mvx, int mvy, int bx, int by, int bs,
+                              uint8_t* pred){
+    float fx = bx + mvx / 4.0f;
+    float fy = by + mvy / 4.0f;
+    int x0 = (int)floorf(fx);
+    int y0 = (int)floorf(fy);
+    float dx = fx - x0;
+    float dy = fy - y0;
+    
+    for(int r = 0; r < bs; r++){
+        for(int c = 0; c < bs; c++){
+            int sy = y0 + r;
+            int sx = x0 + c;
+            if(sy < 0 || sy >= H || sx < 0 || sx >= W){
+                pred[r * bs + c] = 0;
+                continue;
+            }
+            int v00 = ref[sy * W + sx];
+            int v10 = (sx + 1 < W) ? ref[sy * W + sx + 1] : v00;
+            int v01 = (sy + 1 < H) ? ref[(sy + 1) * W + sx] : v00;
+            int v11 = (sx + 1 < W && sy + 1 < H) ? ref[(sy + 1) * W + sx + 1] : v00;
+            float v = v00 * (1 - dx) * (1 - dy) + v10 * dx * (1 - dy) +
+                      v01 * (1 - dx) * dy + v11 * dx * dy;
+            pred[r * bs + c] = (uint8_t)(v < 0 ? 0 : (v > 255 ? 255 : (int)(v + 0.5f)));
+        }
+    }
+}
+
 /* ===== Bit cost estimation ===== */
 
 /* Fast exp-Golomb bit count using clz instead of loop */

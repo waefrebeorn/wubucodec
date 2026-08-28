@@ -168,6 +168,9 @@ test-8k: $(BIN)/wubu_8k_bench
 test-tile: $(BIN)/wubu_tile_bench
 	./$(BIN)/wubu_tile_bench
 
+test-vbs: $(BIN)/wubu_vbs_bench
+	./$(BIN)/wubu_vbs_bench
+
 # Clean
 clean:
 	rm -rf $(OBJ) $(BIN)
