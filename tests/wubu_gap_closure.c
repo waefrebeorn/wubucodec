@@ -198,18 +198,19 @@ int main(void) {
     uint8_t* frames = malloc((size_t)NF * np);
     uint8_t* recon = malloc((size_t)NF * np);
     
-    /* Generate test content: moving object + film grain for B-frame testing */
+    /* Generate test content: static scene + per-frame film grain for B-frame testing */
     for (int i = 0; i < NF; i++) {
         srand(i * 7777); /* deterministic per-frame seed */
         for (int y = 0; y < H; y++) {
             for (int x = 0; x < W; x++) {
+                /* Static base scene: same every frame */
                 float v = 128.0f;
-                /* Moving object: bright square moving 3px/frame (within ME range) */
-                int obj_x = 50 + i * 3;
-                int obj_y = 60;
-                if (obj_x < W && x >= obj_x && x < obj_x + 16 && y >= obj_y && y < obj_y + 16)
-                    v = 220.0f;
-                /* Film grain: per-frame random noise */
+                /* Static object: bright square at fixed position */
+                if (x >= 60 && x < 80 && y >= 50 && y < 70)
+                    v = 200.0f;
+                /* Static background detail */
+                v += 20.0f * sinf(2.0f * M_PI * 4.0f * x / W) * cosf(2.0f * M_PI * 4.0f * y / H);
+                /* Film grain: per-frame random noise (different each frame) */
                 v += (float)((rand() % 60) - 30);
                 if (v < 0) v = 0; if (v > 255) v = 255;
                 frames[(size_t)i * np + y * W + x] = (uint8_t)v;
