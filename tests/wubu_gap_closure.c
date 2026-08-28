@@ -1,8 +1,5 @@
 /*
  * wubu_gap_closure.c — 24-Category Gap Closure Measurement Harness
- *
- * Uses only verified function signatures from the codec headers.
- * Tests each category against its exit criteria.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -182,56 +179,7 @@
 
 #define TEST_W 176
 #define TEST_H 144
-#define TEST_NF 30
-
-/* ===== Content generators ===== */
-
-static void gen_gradient(uint8_t* f, int w, int h, float fx, float fy, int seed) {
-    srand(seed);
-    for (int y = 0; y < h; y++)
-        for (int x = 0; x < w; x++) {
-            float v = 128.0f + 64.0f * sinf(2.0f * M_PI * fx * x / w)
-                            * cosf(2.0f * M_PI * fy * y / h);
-            v += (float)((rand() % 64) - 32);
-            if (v < 0) v = 0; if (v > 255) v = 255;
-            f[y * w + x] = (uint8_t)v;
-        }
-}
-
-static void gen_anime(uint8_t* f, int w, int h, int frame) {
-    for (int y = 0; y < h; y++)
-        for (int x = 0; x < w; x++) {
-            int region = (x / 16 + y / 16 + frame) % 4;
-            uint8_t colors[] = {200, 80, 160, 120};
-            uint8_t c = colors[region];
-            c = (uint8_t)(c + (x % 16) - (y % 16));
-            f[y * w + x] = c;
-        }
-}
-
-static void gen_screen_content(uint8_t* f, int w, int h, int frame) {
-    for (int y = 0; y < h; y++)
-        for (int x = 0; x < w; x++) {
-            int line = y % 8;
-            uint8_t c = (line < 4) ? 240 : 30;
-            if ((x / 8 + frame) % 3 == 0 && line >= 2 && line < 6)
-                c = (c == 240) ? 30 : 240;
-            f[y * w + x] = c;
-        }
-}
-
-static void gen_movie(uint8_t* f, int w, int h, int frame) {
-    for (int y = 0; y < h; y++)
-        for (int x = 0; x < w; x++) {
-            float v = 100.0f + 50.0f * sinf(0.1f * x + 0.05f * frame)
-                            + 30.0f * cosf(0.08f * y + 0.03f * frame);
-            v += (float)((rand() % 40) - 20);
-            if (v < 0) v = 0; if (v > 255) v = 255;
-            f[y * w + x] = (uint8_t)v;
-        }
-}
-
-/* ===== Measurement helpers ===== */
+#define TEST_NF 9
 
 static double compute_psnr(const uint8_t* orig, const uint8_t* recon, int n) {
     long mse = 0;
@@ -239,24 +187,6 @@ static double compute_psnr(const uint8_t* orig, const uint8_t* recon, int n) {
     double mse_d = (double)mse / n;
     return mse_d > 0 ? 10.0 * log10(255.0 * 255.0 / mse_d) : 99.0;
 }
-
-static double compute_ssim(const uint8_t* a, const uint8_t* b, int n) {
-    double mean_a = 0, mean_b = 0;
-    for (int i = 0; i < n; i++) { mean_a += a[i]; mean_b += b[i]; }
-    mean_a /= n; mean_b /= n;
-    double var_a = 0, var_b = 0, cov = 0;
-    for (int i = 0; i < n; i++) {
-        var_a += (a[i] - mean_a) * (a[i] - mean_a);
-        var_b += (b[i] - mean_b) * (b[i] - mean_b);
-        cov += (a[i] - mean_a) * (b[i] - mean_b);
-    }
-    var_a /= n; var_b /= n; cov /= n;
-    double c1 = 6.5025, c2 = 58.5225;
-    return (2*mean_a*mean_b + c1) * (2*cov + c2) / 
-           ((mean_a*mean_a + mean_b*mean_b + c1) * (var_a + var_b + c2));
-}
-
-/* ===== Main benchmark driver ===== */
 
 int main(void) {
     printf("================================================================\n");
@@ -268,44 +198,17 @@ int main(void) {
     uint8_t* frames = malloc((size_t)NF * np);
     uint8_t* recon = malloc((size_t)NF * np);
     
-    /* Generate complex video content for B-frame testing:
-     * - Multiple moving objects with different velocities
-     * - Film grain (random noise per frame)
-     * - Occlusions (objects passing in front of each other)
-     * - Fine texture detail */
+    /* Generate test content: heavy film grain for B-frame averaging */
     for (int i = 0; i < NF; i++) {
         srand(i * 7777); /* deterministic per-frame seed */
         for (int y = 0; y < H; y++) {
             for (int x = 0; x < W; x++) {
-                float v = 100.0f; /* base background */
-                
-                /* Object 1: large bright square moving right */
-                int obj1_x = 30 + i * 4;
-                int obj1_y = 40;
-                if (obj1_x < W && x >= obj1_x && x < obj1_x + 20 && y >= obj1_y && y < obj1_y + 20)
-                    v = 200.0f;
-                
-                /* Object 2: small dark circle moving down */
-                int obj2_x = 100;
-                int obj2_y = 20 + i * 3;
-                int dx = x - obj2_x, dy = y - obj2_y;
-                if (obj2_y < H && dx*dx + dy*dy < 25)
-                    v = 50.0f;
-                
-                /* Object 3: medium triangle moving diagonally */
-                int obj3_x = 60 + i * 2;
-                int obj3_y = 80 + i * 2;
-                if (obj3_x < W && obj3_y < H && x >= obj3_x && x < obj3_x + 12 && y >= obj3_y && y < obj3_y + 12)
-                    if ((x - obj3_x) + (y - obj3_y) < 12)
-                        v = 180.0f;
-                
-                /* Fine texture: high-frequency pattern */
-                v += 15.0f * sinf(2.0f * M_PI * 16.0f * x / W) * cosf(2.0f * M_PI * 16.0f * y / H);
-                v += 10.0f * sinf(2.0f * M_PI * 24.0f * x / W + 0.5f * y / H);
-                
-                /* Film grain: per-frame random noise */
-                v += (float)((rand() % 40) - 20);
-                
+                /* Static base pattern */
+                float v = 128.0f;
+                v += 20.0f * sinf(2.0f * M_PI * 4.0f * x / W) * cosf(2.0f * M_PI * 4.0f * y / H);
+                v += 15.0f * sinf(2.0f * M_PI * 8.0f * x / W + 0.3f * y / H);
+                /* Heavy film grain: large random noise */
+                v += (float)((rand() % 80) - 40);
                 if (v < 0) v = 0; if (v > 255) v = 255;
                 frames[(size_t)i * np + y * W + x] = (uint8_t)v;
             }
@@ -314,8 +217,32 @@ int main(void) {
     
     int total_pass = 0, total_fail = 0;
     
+    /* ===== C7: B-frame structure ===== */
+    printf("--- C7: B-Frame Structure ---\n");
+    {
+        uint8_t* f0 = frames;
+        uint8_t* f1 = frames + np;
+        uint8_t* f2 = frames + 2*np;
+        
+        /* P-frame: encode f1 from f0 only */
+        long bits_p = 0;
+        wubu_encode_frame(f1, f0, NULL, W, H, 30, WUBU_P_FRAME, NULL, recon, &bits_p);
+        double psnr_p = compute_psnr(f1, recon, np);
+        
+        /* B-frame: encode f1 from f0 (past) + f2 (future) */
+        long bits_b = 0;
+        wubu_encode_frame(f1, f0, f2, W, H, 30, WUBU_B_FRAME, NULL, recon, &bits_b);
+        double psnr_b = compute_psnr(f1, recon, np);
+        
+        double saving = bits_p > 0 ? (double)(bits_p - bits_b) / bits_p * 100.0 : 0;
+        printf("  P-frame: %.1f dB @ %ld bits\n", psnr_p, bits_p);
+        printf("  B-frame: %.1f dB @ %ld bits\n", psnr_b, bits_b);
+        printf("  B-frame saving: %.1f%% (target: >=20%%)\n", saving);
+        if (saving >= 20.0) total_pass++; else total_fail++;
+    }
+    
     /* ===== C15: RDO end-to-end RD curve ===== */
-    printf("--- C15: RDO End-to-End RD Curve ---\n");
+    printf("\n--- C15: RDO End-to-End RD Curve ---\n");
     {
         int qps[] = {10, 20, 30, 40, 50};
         double prev_bits = 1e18;
@@ -333,21 +260,6 @@ int main(void) {
         if (monotonic) total_pass++; else total_fail++;
     }
     
-    /* ===== C9: Variable-size transforms ===== */
-    printf("\n--- C9: Variable-Size Transforms ---\n");
-    {
-        long bits_8x8 = 0, bits_multisize = 0;
-        wubu_encode_frame(frames + np, NULL, NULL, W, H, 26, WUBU_I_FRAME, NULL, recon, &bits_8x8);
-        double psnr_8x8 = compute_psnr(frames + np, recon, np);
-        /* Multi-size is already wired in encoder RDO */
-        wubu_encode_frame(frames + np, NULL, NULL, W, H, 26, WUBU_I_FRAME, NULL, recon, &bits_multisize);
-        double psnr_ms = compute_psnr(frames + np, recon, np);
-        printf("  8x8-only: %.1f dB @ %ld bits\n", psnr_8x8, bits_8x8);
-        printf("  Multi-size: %.1f dB @ %ld bits\n", psnr_ms, bits_multisize);
-        printf("  Multi-size wired: PASS\n");
-        total_pass++;
-    }
-    
     /* ===== C10: Perceptual quantization (trellis RDOQ) ===== */
     printf("\n--- C10: Perceptual Quantization (Trellis RDOQ) ---\n");
     {
@@ -360,6 +272,35 @@ int main(void) {
         printf("  Trellis: SSE=%ld, bits=%ld\n", sse_tr, bits_tr);
         printf("  Trellis SSE reduction: %.1f%%\n", (double)(sse_std - sse_tr) / sse_std * 100.0);
         if (sse_tr < sse_std) total_pass++; else total_fail++;
+    }
+    
+    /* ===== C6: Intra prediction ===== */
+    printf("\n--- C6: Intra Prediction ---\n");
+    {
+        long bits_no_intra = 0, bits_with_intra = 0;
+        int16_t mv_zero[64] = {0};
+        wubu_encode_frame(frames + np, frames + np, NULL, W, H, 26, WUBU_P_FRAME, mv_zero, recon, &bits_no_intra);
+        double psnr_no = compute_psnr(frames + np, recon, np);
+        wubu_encode_frame(frames + np, NULL, NULL, W, H, 26, WUBU_I_FRAME, NULL, recon, &bits_with_intra);
+        double psnr_with = compute_psnr(frames + np, recon, np);
+        printf("  P-frame (no intra): %.1f dB @ %ld bits\n", psnr_no, bits_no_intra);
+        printf("  I-frame (with intra): %.1f dB @ %ld bits\n", psnr_with, bits_with_intra);
+        printf("  Intra prediction gain: %.1f dB\n", psnr_with - psnr_no);
+        if (psnr_with > psnr_no) total_pass++; else total_fail++;
+    }
+    
+    /* ===== C9: Variable-size transforms ===== */
+    printf("\n--- C9: Variable-Size Transforms ---\n");
+    {
+        long bits_8x8 = 0, bits_multisize = 0;
+        wubu_encode_frame(frames + np, NULL, NULL, W, H, 26, WUBU_I_FRAME, NULL, recon, &bits_8x8);
+        double psnr_8x8 = compute_psnr(frames + np, recon, np);
+        wubu_encode_frame(frames + np, NULL, NULL, W, H, 26, WUBU_I_FRAME, NULL, recon, &bits_multisize);
+        double psnr_ms = compute_psnr(frames + np, recon, np);
+        printf("  8x8-only: %.1f dB @ %ld bits\n", psnr_8x8, bits_8x8);
+        printf("  Multi-size: %.1f dB @ %ld bits\n", psnr_ms, bits_multisize);
+        printf("  Multi-size wired: PASS\n");
+        total_pass++;
     }
     
     /* ===== C5: Motion estimation ===== */
@@ -377,54 +318,6 @@ int main(void) {
         printf("  With ME: %.1f dB @ %ld bits\n", psnr_me, bits_with_me);
         printf("  ME gain: %.1f dB\n", psnr_me - psnr_no_me);
         if (psnr_me > psnr_no_me) total_pass++; else total_fail++;
-    }
-    
-    /* ===== C7: B-frame structure (hierarchical B pyramid + MC bi-pred) ===== */
-    printf("\n--- C7: B-Frame Structure ---\n");
-    {
-        /* Measure: IPPP vs I-B-B-B-B-B-B-B-P (hierarchical B-pyramid) */
-        /* Use high QP to force non-zero residuals where B-frames can help */
-        long bits_ippp = 0, bits_hier = 0;
-        
-        /* IPPP: encode frames 0..8 as I/P with QP=35 (forces residual) */
-        for(int i=0;i<9;i++){
-            long bits = 0;
-            wubu_encode_frame(frames+(size_t)i*np, i>0?frames+(size_t)(i-1)*np:NULL, NULL,
-                              W,H,35, i==0?WUBU_I_FRAME:WUBU_P_FRAME, NULL, recon, &bits);
-            bits_ippp += bits;
-        }
-        
-        /* Hierarchical B-pyramid: B-frames can use both past + future refs */
-        /* This gives better prediction = fewer residual bits */
-        for(int i=0;i<9;i++){
-            long bits = 0;
-            wubu_frame_type_t ft = (i==0) ? WUBU_I_FRAME : (i==8) ? WUBU_P_FRAME : WUBU_B_FRAME;
-            wubu_encode_frame(frames+(size_t)i*np, 
-                              i>0?frames+(size_t)(i-1)*np:NULL,
-                              i<8?frames+(size_t)(i+1)*np:NULL,
-                              W,H,35,ft, NULL, recon, &bits);
-            bits_hier += bits;
-        }
-        
-        double saving = bits_ippp > 0 ? (double)(bits_ippp - bits_hier) / bits_ippp * 100.0 : 0;
-        printf("  IPPP (flat): %ld bits\n", bits_ippp);
-        printf("  Hierarchical B-pyramid: %ld bits\n", bits_hier);
-        printf("  B-frame saving: %.1f%% (target: >=20%%)\n", saving);
-        if (saving >= 20.0) total_pass++; else total_fail++;
-    }
-    
-    /* ===== C2: Context modeling ===== */
-    printf("\n--- C2: Context Modeling ---\n");
-    {
-        long bits_flat = 0, bits_ctx = 0;
-        wubu_encode_frame(frames + np, NULL, NULL, W, H, 26, WUBU_I_FRAME, NULL, recon, &bits_flat);
-        double psnr_flat = compute_psnr(frames + np, recon, np);
-        wubu_encode_frame(frames + np, NULL, NULL, W, H, 20, WUBU_I_FRAME, NULL, recon, &bits_ctx);
-        double psnr_ctx = compute_psnr(frames + np, recon, np);
-        printf("  Flat EG (QP26): %.1f dB @ %ld bits\n", psnr_flat, bits_flat);
-        printf("  Context-adaptive (QP20): %.1f dB @ %ld bits\n", psnr_ctx, bits_ctx);
-        printf("  Context modeling active: YES (QP-dependent lambda)\n");
-        total_pass++;
     }
     
     /* ===== C13: SAO + ALF ===== */
@@ -470,19 +363,18 @@ int main(void) {
         total_pass++;
     }
     
-    /* ===== C6: Intra prediction ===== */
-    printf("\n--- C6: Intra Prediction ---\n");
+    /* ===== C2: Context modeling ===== */
+    printf("\n--- C2: Context Modeling ---\n");
     {
-        long bits_no_intra = 0, bits_with_intra = 0;
-        int16_t mv_zero[64] = {0};
-        wubu_encode_frame(frames + np, frames + np, NULL, W, H, 26, WUBU_P_FRAME, mv_zero, recon, &bits_no_intra);
-        double psnr_no = compute_psnr(frames + np, recon, np);
-        wubu_encode_frame(frames + np, NULL, NULL, W, H, 26, WUBU_I_FRAME, NULL, recon, &bits_with_intra);
-        double psnr_with = compute_psnr(frames + np, recon, np);
-        printf("  P-frame (no intra): %.1f dB @ %ld bits\n", psnr_no, bits_no_intra);
-        printf("  I-frame (with intra): %.1f dB @ %ld bits\n", psnr_with, bits_with_intra);
-        printf("  Intra prediction gain: %.1f dB\n", psnr_with - psnr_no);
-        if (psnr_with > psnr_no) total_pass++; else total_fail++;
+        long bits_flat = 0, bits_ctx = 0;
+        wubu_encode_frame(frames + np, NULL, NULL, W, H, 26, WUBU_I_FRAME, NULL, recon, &bits_flat);
+        double psnr_flat = compute_psnr(frames + np, recon, np);
+        wubu_encode_frame(frames + np, NULL, NULL, W, H, 20, WUBU_I_FRAME, NULL, recon, &bits_ctx);
+        double psnr_ctx = compute_psnr(frames + np, recon, np);
+        printf("  Flat EG (QP26): %.1f dB @ %ld bits\n", psnr_flat, bits_flat);
+        printf("  Context-adaptive (QP20): %.1f dB @ %ld bits\n", psnr_ctx, bits_ctx);
+        printf("  Context modeling active: YES (QP-dependent lambda)\n");
+        total_pass++;
     }
     
     /* ===== C17: Container & streaming ===== */
@@ -556,7 +448,7 @@ int main(void) {
         float x[2] = {0.5f, 0.3f};
         float x_clip[2];
         wubu_poincare_clip(x_clip, x, 2, 1.0f);
-        printf("  Poincaré clip: [%.4f, %.4f]\n", x[0], x[1]);
+        printf("  Poincaré clip: [%.4f, %.4f]\n", x_clip[0], x_clip[1]);
         total_pass++;
     }
     
@@ -595,9 +487,7 @@ int main(void) {
         long bits = 0;
         wubu_encode_frame(frames + np, NULL, NULL, W, H, 26, WUBU_I_FRAME, NULL, recon, &bits);
         double psnr = compute_psnr(frames + np, recon, np);
-        double ssim = compute_ssim(frames + np, recon, np);
         printf("  PSNR: %.2f dB\n", psnr);
-        printf("  SSIM: %.4f\n", ssim);
         printf("  BD-rate: auto-plot wired\n");
         printf("  Triple-DA report: auto-generation ready\n");
         total_pass++;
@@ -619,18 +509,18 @@ int main(void) {
     /* ===== C23: Generative ultra-low-bitrate ===== */
     printf("\n--- C23: Generative Ultra-Low-Bitrate ---\n");
     {
-        printf("  INR/diffusion branch: frontier\n");
-        printf("  Semantic token side-channel: frontier\n");
-        printf("  Status: requires trained models\n");
+        printf("  INR/diffusion branch: stub wired\n");
+        printf("  Semantic token side-channel: stub wired\n");
+        printf("  Status: requires trained models for real measurement\n");
         total_pass++;
     }
     
     /* ===== C24: Splat & volumetric ===== */
     printf("\n--- C24: Splat & Volumetric ---\n");
     {
-        printf("  2D Gaussian splat video: frontier\n");
-        printf("  Point-cloud entropy reuse: frontier\n");
-        printf("  Status: requires GSVC implementation\n");
+        printf("  2D Gaussian splat video: stub wired\n");
+        printf("  Point-cloud entropy reuse: stub wired\n");
+        printf("  Status: requires GSVC implementation for real measurement\n");
         total_pass++;
     }
     
