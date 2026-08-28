@@ -25,9 +25,16 @@
 #include "wubu_motionest.h"
 #include "wubu_deblock.h"
 #include "wubu_sao.h"
+#include "wubu_simd.h"
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+
+#if defined(__AVX2__)
+#include <immintrin.h>
+#elif defined(__SSE4_1__)
+#include <smmintrin.h>
+#endif
 
 #ifndef M_PI
 #define M_PI 3.14159265358979f
@@ -126,10 +133,12 @@ static void inter_pred_plane(const uint8_t* ref,int W,int H,
 }
 
 /* Motion-compensated prediction with half-pel refinement */
+/* mvx, mvy are in quarter-pel units (divide by 4.0 for pixel units) */
+/* bx, by are pixel coordinates (not block indices) */
 static void mc_pred(const uint8_t* ref,int W,int H,
                      int mvx,int mvy,int bx,int by,uint8_t* pred){
     /* Simple half-pel MC: bilinear interpolation */
-    float fx=bx*BS+mvx, fy=by*BS+mvy;
+    float fx=bx+mvx/4.0f, fy=by+mvy/4.0f;
     int x0=(int)floorf(fx), y0=(int)floorf(fy);
     float dx=fx-x0, dy=fy-y0;
     for(int r=0;r<BS;r++){
@@ -148,21 +157,196 @@ static void mc_pred(const uint8_t* ref,int W,int H,
 
 /* ===== Bit cost estimation ===== */
 
+/* Fast exp-Golomb bit count using clz instead of loop */
+static inline int eg_bits(int s){
+    if(s==0) return 0;
+    unsigned code = (s > 0) ? (unsigned)(2*s - 1) : (unsigned)(-2*s);
+    /* bits = 2*floor(log2(code+1))+1 */
+    int k = 31 - __builtin_clz(code + 1);
+    return 2*k + 1;
+}
+
 static int est_block_bits(const int16_t* quant){
     int bits=0;
     for(int i=0;i<64;i++){
         if(quant[i]!=0){
-            /* Matches exp-Golomb cost: code=(s>0?2s-1:-2s), bits=2*floor(log2(code+1))+1 */
-            int s = quant[i];
-            unsigned code = (s > 0) ? (unsigned)(2*s - 1) : (unsigned)(-2*s);
-            int k = 0;
-            unsigned v1 = code + 1;
-            while ((v1 >> (k + 1)) && k < 30) k++;
-            bits += 2*k + 1;
+            bits += eg_bits(quant[i]);
         }
     }
     return bits+4; /* ~4 byte flush overhead */
 }
+
+/* Fast SSE using SIMD if available */
+static long fast_sse(const uint8_t* a, const uint8_t* b, int n){
+    long sse = 0;
+    int i = 0;
+#if defined(__AVX2__)
+    /* Process 32 bytes at a time with AVX2 */
+    for(; i + 32 <= n; i += 32){
+        __m256i va = _mm256_loadu_si256((const __m256i*)(a+i));
+        __m256i vb = _mm256_loadu_si256((const __m256i*)(b+i));
+        __m256i diff = _mm256_sub_epi8(va, vb);
+        __m256i absdiff = _mm256_abs_epi8(diff);
+        /* Square and horizontal sum */
+        __m256i lo = _mm256_unpacklo_epi8(absdiff, _mm256_setzero_si256());
+        __m256i hi = _mm256_unpackhi_epi8(absdiff, _mm256_setzero_si256());
+        __m256i sqlo = _mm256_madd_epi16(lo, lo);
+        __m256i sqhi = _mm256_madd_epi16(hi, hi);
+        __m256i sum = _mm256_add_epi32(sqlo, sqhi);
+        /* Horizontal sum of 8 uint32 */
+        __m128i sum128 = _mm_add_epi32(_mm256_castsi256_si128(sum), _mm256_extracti128_si256(sum, 1));
+        sum128 = _mm_hadd_epi32(sum128, sum128);
+        sum128 = _mm_hadd_epi32(sum128, sum128);
+        sse += _mm_extract_epi32(sum128, 0) + _mm_extract_epi32(sum128, 1);
+    }
+#elif defined(__SSE4_1__)
+    for(; i + 16 <= n; i += 16){
+        __m128i va = _mm_loadu_si128((const __m128i*)(a+i));
+        __m128i vb = _mm_loadu_si128((const __m128i*)(b+i));
+        __m128i diff = _mm_sub_epi8(va, vb);
+        __m128i absdiff = _mm_abs_epi8(diff);
+        __m128i lo = _mm_unpacklo_epi8(absdiff, _mm_setzero_si128());
+        __m128i hi = _mm_unpackhi_epi8(absdiff, _mm_setzero_si128());
+        __m128i sqlo = _mm_madd_epi16(lo, lo);
+        __m128i sqhi = _mm_madd_epi16(hi, hi);
+        __m128i sum = _mm_add_epi32(sqlo, sqhi);
+        sum = _mm_hadd_epi32(sum, sum);
+        sum = _mm_hadd_epi32(sum, sum);
+        sse += _mm_extract_epi32(sum, 0);
+    }
+#endif
+    for(; i < n; i++){
+        int d = (int)a[i] - (int)b[i];
+        sse += d*d;
+    }
+    return sse;
+}
+
+/* Compute local variance for early-skip decision */
+static long block_variance(const uint8_t* blk, int n){
+    long sum = 0, sum_sq = 0;
+    for(int i = 0; i < n; i++){
+        long v = blk[i];
+        sum += v;
+        sum_sq += v*v;
+    }
+    long mean = sum / n;
+    return sum_sq/n - mean*mean;
+}
+
+/* ===== MVP-based fast ME ===== */
+
+/* Get motion vector predictor from spatial/temporal neighbors (block coords) */
+static void get_mvp(const int16_t* mvs, int nbx, int bx, int by, int* mvp_x, int* mvp_y){
+    int idx = by * nbx + bx;
+    int cnt = 0;
+    int sx = 0, sy = 0;
+    
+    /* Left neighbor */
+    if(bx > 0){
+        sx += mvs[(idx-1)*2];
+        sy += mvs[(idx-1)*2+1];
+        cnt++;
+    }
+    /* Top neighbor */
+    if(by > 0){
+        sx += mvs[(idx-nbx)*2];
+        sy += mvs[(idx-nbx)*2+1];
+        cnt++;
+    }
+    /* Top-right neighbor */
+    if(by > 0 && bx < nbx-1){
+        sx += mvs[(idx-nbx+1)*2];
+        sy += mvs[(idx-nbx+1)*2+1];
+        cnt++;
+    }
+    
+    if(cnt > 0){
+        *mvp_x = sx / cnt;
+        *mvp_y = sy / cnt;
+    }else{
+        *mvp_x = 0;
+        *mvp_y = 0;
+    }
+}
+
+/* Fast ME with MVP and early termination */
+static long wubu_me_block_fast(const uint8_t* curr, const uint8_t* ref,
+                                int W, int H, int bx, int by, int bs,
+                                int search_range, int* out_dx, int* out_dy,
+                                const int16_t* mvs, int nbx){
+    /* Get MVP from neighbors */
+    int mvp_x, mvp_y;
+    get_mvp(mvs, nbx, bx/bs, by/bs, &mvp_x, &mvp_y);
+    
+    /* Start from MVP */
+    int best_dx = mvp_x;
+    int best_dy = mvp_y;
+    long best_sad = wubu_me_sad(curr, ref, W, H, bx, by, bs, mvp_x, mvp_y);
+    
+    /* Early termination: if MVP SAD is very low, skip search */
+    if(best_sad < bs * bs * 4){
+        *out_dx = best_dx;
+        *out_dy = best_dy;
+        return best_sad;
+    }
+    
+    /* Also check (0,0) for static regions */
+    long sad_zero = wubu_me_sad(curr, ref, W, H, bx, by, bs, 0, 0);
+    if(sad_zero < best_sad){
+        best_sad = sad_zero;
+        best_dx = 0;
+        best_dy = 0;
+    }
+    
+    /* Diamond search around best */
+    static const int dia_dx[] = {0, -1, 0, 1, 0};
+    static const int dia_dy[] = {-1, 0, 1, 0, -1};
+    
+    int improved = 1;
+    while(improved){
+        improved = 0;
+        for(int d = 0; d < 4; d++){
+            int ndx = best_dx + dia_dx[d];
+            int ndy = best_dy + dia_dy[d];
+            if(abs(ndx) > search_range || abs(ndy) > search_range) continue;
+            long sad = wubu_me_sad(curr, ref, W, H, bx, by, bs, ndx, ndy);
+            if(sad < best_sad){
+                best_sad = sad;
+                best_dx = ndx;
+                best_dy = ndy;
+                improved = 1;
+            }
+        }
+    }
+    
+    *out_dx = best_dx;
+    *out_dy = best_dy;
+    return best_sad;
+}
+
+/* ===== Encoder presets ===== */
+/* 0=ultrafast (lowest quality, highest speed), 1=fast, 2=medium, 3=slow */
+typedef struct {
+    int me_search_range;     /* motion search range in pixels */
+    int max_transforms;      /* max transform candidates to try (1-3) */
+    int enable_early_skip;   /* early-skip detection */
+    int enable_aq;           /* adaptive quantization */
+    int enable_trellis_rdoq; /* trellis RDOQ (0=rounding only) */
+    int enable_bframe_me;    /* B-frame bidirectional ME */
+    int me_precision;        /* 1=integer, 2=quarter-pel */
+} WubuPreset;
+
+static const WubuPreset presets[] = {
+    /* ultrafast: minimal search, single transform, no RDOQ */
+    {4, 1, 1, 0, 0, 0, 1},
+    /* fast: moderate search, 2 transforms, early skip */
+    {8, 2, 1, 1, 0, 1, 1},
+    /* medium: full search, all transforms, trellis RDOQ */
+    {12, 3, 1, 1, 1, 1, 2},
+    /* slow: extended search, all transforms, full RDO */
+    {16, 3, 1, 1, 1, 1, 2},
+};
 
 /* ===== Main encoder ===== */
 
@@ -183,13 +367,11 @@ int wubu_encode_frame(const uint8_t* orig,
 
     /* Compute motion vectors if not provided (P/B frames) */
     int16_t* computed_mv = NULL;
+    int nbx = W / BS, nby = H / BS;
     if(mv_grid == NULL && ref_past != NULL && frame_type != WUBU_I_FRAME) {
-        int nbx = W / BS, nby = H / BS;
-        /* wubu_me_frame writes int (4 bytes), so use int buffer */
         int* mv_buf = malloc((size_t)nbx * nby * 2 * sizeof(int));
         if(mv_buf) {
             wubu_me_frame(orig, ref_past, W, H, BS, 8, mv_buf);
-            /* Convert to int16_t */
             computed_mv = malloc((size_t)nbx * nby * 2 * sizeof(int16_t));
             if(computed_mv) {
                 for(int i=0;i<nbx*nby*2;i++) computed_mv[i] = (int16_t)mv_buf[i];
@@ -198,6 +380,12 @@ int wubu_encode_frame(const uint8_t* orig,
         }
     }
     const int16_t* mvs = mv_grid ? mv_grid : computed_mv;
+
+    /* Adaptive QP offset */
+    int aq_offset = wubu_aq_offset(orig, W, H, 0, 0, BS, 4);
+    int eff_qp = qp + aq_offset;
+    if(eff_qp < 0) eff_qp = 0;
+    if(eff_qp > 51) eff_qp = 51;
 
     /* encode in 8×8 blocks */
     for(int by=0;by<H;by+=BS){
@@ -225,10 +413,10 @@ int wubu_encode_frame(const uint8_t* orig,
                 for(int i=0;i<npw*nph;i++)
                     res[i]=(int16_t)((int)org_blk[i]-(int)pred[i]);
 
-                /* transform + quantize using simple shift (matches integrated codec) */
+                /* transform + quantize using simple shift */
                 int16_t coeffs[64]={0};
                 wubu_tr_forward(res,coeffs,BS);
-                int qshift = qp / 2;
+                int qshift = eff_qp / 2;
                 if (qshift < 1) qshift = 1;
                 int qstep = qshift + 1;
                 int16_t trellis_levels[64];
@@ -242,7 +430,7 @@ int wubu_encode_frame(const uint8_t* orig,
                 /* bits estimate from levels (exp-Golomb cost) */
                 int bits=0;
                 for(int i=0;i<64;i++)
-                    if(trellis_levels[i]!=0) bits+=tr_bits_for_level(trellis_levels[i]);
+                    if(trellis_levels[i]!=0) bits+=eg_bits(trellis_levels[i]);
                 *total_bits+=bits+4;
 
                 /* reconstruct: inverse DCT + add pred */
@@ -285,12 +473,12 @@ int wubu_encode_frame(const uint8_t* orig,
                 
                 /* Search for best MV in past reference (list0) */
                 int dx_past, dy_past;
-                wubu_me_block(orig,ref_past,W,H,bx,by,BS,12,&dx_past,&dy_past);
+                wubu_me_block_fast(orig,ref_past,W,H,bx,by,BS,12,&dx_past,&dy_past,mvs,nbx);
                 mvx_past=dx_past; mvy_past=dy_past;
                 
                 /* Search for best MV in future reference (list1) */
                 int dx_future, dy_future;
-                wubu_me_block(orig,ref_future,W,H,bx,by,BS,12,&dx_future,&dy_future);
+                wubu_me_block_fast(orig,ref_future,W,H,bx,by,BS,12,&dx_future,&dy_future,mvs,nbx);
                 mvx_future=dx_future; mvy_future=dy_future;
                 
                 /* Motion compensate from both references with separate MVs */
@@ -311,10 +499,8 @@ int wubu_encode_frame(const uint8_t* orig,
                 double rd_b=(double)sse_b+lambda*2;
                 
                 if(rd_b<rd_p){
-                    /* B-frame wins */
                     for(int i=0;i<npw*nph;i++) pred[i]=pred_b[i];
                 }else{
-                    /* P-frame wins */
                     for(int i=0;i<npw*nph;i++) pred[i]=pred_p[i];
                 }
             }else if(ref_past){
@@ -338,149 +524,153 @@ int wubu_encode_frame(const uint8_t* orig,
             for(int i=0;i<npw*nph;i++)
                 res[i]=(int16_t)((int)org_blk[i]-(int)pred[i]);
 
-            /* ===== C9: variable-size transform selection ===== */
-            /* Try candidate transforms, pick best RD (SSE + λ·bits) */
-            int qshift = qp / 2;
-
-            /* candidate 1: 8x8 DCT (baseline) */
-            int16_t coeffs8[64]={0};
-            wubu_tr_forward(res,coeffs8,BS);
-            double dcoeffs8[64];
-            for(int i=0;i<64;i++)dcoeffs8[i]=(double)coeffs8[i];
-            int16_t levels8[64];
-            double qstep8 = 1 << qshift;
-            wubu_trellis_quantize(dcoeffs8,64,qstep8,lambda,levels8);
-            int16_t dq8[64], recon8[64];
-            for(int i=0;i<64;i++) dq8[i]=(int16_t)(levels8[i]*qstep8);
-            wubu_tr_inverse(dq8,recon8,BS);
-            int bits8=0;
-            for(int i=0;i<64;i++) if(levels8[i]!=0) bits8+=tr_bits_for_level(levels8[i]);
-            long sse8=0;
-            for(int i=0;i<npw*nph;i++){
-                int val=pred[i]+recon8[i];
-                if(val<0)val=0; if(val>255)val=255;
-                int d=org_blk[i]-val; sse8+=d*d;
-                }
-            double rd8=(double)sse8+lambda*bits8;
-
-            /* candidate 2: 8x8 DST-VII (intra only) */
-            int16_t coeffs_dst7[64]={0};
-            double rd_dst7=1e30;
-            int16_t levels_dst7[64], dq_dst7[64], recon_dst7[64];
-            if(frame_type==WUBU_I_FRAME){
-                wubu_tr_forward_dst7_4x4(res,coeffs_dst7);
-                double dcoeffs_dst7[64];
-                for(int i=0;i<64;i++)dcoeffs_dst7[i]=(double)coeffs_dst7[i];
-                double qstep_dst7 = 1 << qshift;
-                wubu_trellis_quantize(dcoeffs_dst7,64,qstep_dst7,lambda,levels_dst7);
-                int16_t dq_dst7[64], recon_dst7[64];
-                for(int i=0;i<64;i++) dq_dst7[i]=(int16_t)(levels_dst7[i]*qstep_dst7);
-                wubu_tr_inverse_dst7_4x4(dq_dst7,recon_dst7);
-                int bits_dst7=0;
-                for(int i=0;i<64;i++) if(levels_dst7[i]!=0) bits_dst7+=tr_bits_for_level(levels_dst7[i]);
-                long sse_dst7=0;
-                for(int i=0;i<npw*nph;i++){
-                    int val=pred[i]+recon_dst7[i];
-                    if(val<0)val=0; if(val>255)val=255;
-                    int d=org_blk[i]-val; sse_dst7+=d*d;
-                }
-                rd_dst7=(double)sse_dst7+lambda*bits_dst7;
-            }
-
-            /* candidate 3: 4x4 DCT (tile 8x8 block into four 4x4 sub-blocks) */
-            int16_t coeffs4[64]={0};
-            int16_t levels4[64], dq4[64], recon4[64]={0};
-            double rd4=1e30;
-            {
-                int16_t sub_in[4][16], sub_out[4][16];
-                for(int sb=0;sb<4;sb++){
-                    int sy=(sb/2)*4, sx=(sb%2)*4;
-                    for(int r=0;r<4;r++)
-                        for(int c=0;c<4;c++)
-                            sub_in[sb][r*4+c]=(int16_t)res[sy*BS+sx+c];
-                    wubu_tr_forward_size(4,sub_in[sb],sub_out[sb]);
-                }
-                for(int sb=0;sb<4;sb++)
-                    for(int i=0;i<16;i++)
-                        coeffs4[sb*16+i]=sub_out[sb][i];
-                double dcoeffs4[64];
-                for(int i=0;i<64;i++)dcoeffs4[i]=(double)coeffs4[i];
-                double qstep4 = 1 << qshift;
-                wubu_trellis_quantize(dcoeffs4,64,qstep4,lambda,levels4);
-                int16_t dq4[64];
-                for(int i=0;i<64;i++) dq4[i]=(int16_t)(levels4[i]*qstep4);
-                for(int sb=0;sb<4;sb++){
-                    int16_t sub_dq[16], sub_recon[16];
-                    for(int i=0;i<16;i++) sub_dq[i]=dq4[sb*16+i];
-                    wubu_tr_inverse_size(4,sub_dq,sub_recon);
-                    int sy=(sb/2)*4, sx=(sb%2)*4;
-                    for(int r=0;r<4;r++)
-                        for(int c=0;c<4;c++)
-                            recon4[sy*BS+sx+c]=sub_recon[r*4+c];
-                }
-                int bits4=0;
-                for(int i=0;i<64;i++) if(levels4[i]!=0) bits4+=tr_bits_for_level(levels4[i]);
-                long sse4=0;
-                for(int i=0;i<npw*nph;i++){
-                    int val=pred[i]+recon4[i];
-                    if(val<0)val=0; if(val>255)val=255;
-                    int d=org_blk[i]-val; sse4+=d*d;
-                }
-                rd4=(double)sse4+lambda*bits4;
-            }
-
-            /* pick best transform: lowest RD cost */
-            int best_tr=0; /* 0=8x8 DCT, 1=DST-VII (intra only), 2=4x4 DCT */
-            double rd_best=rd8;
-            int16_t* best_levels=levels8;
-            int16_t* best_recon=recon8;
-
-            if(rd_dst7<rd_best && frame_type==WUBU_I_FRAME){
-                rd_best=rd_dst7; best_tr=1; best_levels=levels_dst7;
-                best_recon=recon_dst7;
-            }
-            if(rd4<rd_best){
-                rd_best=rd4; best_tr=2; best_levels=levels4;
-                best_recon=recon4;
-            }
-
-            /* use best transform for reconstruction */
-            int bits=0;
-            for(int i=0;i<64;i++) if(best_levels[i]!=0) bits+=tr_bits_for_level(best_levels[i]);
-
-            /* compute SSE for both paths */
-            /* SKIP: SSE(orig, pred) */
-            long sse_skip=0;
-            for(int i=0;i<npw*nph;i++){
-                int d=org_blk[i]-pred[i];
-                sse_skip+=d*d;
-            }
-            double rd_skip=(double)sse_skip+lambda*1; /* ~1 bit flag */
-
-            /* RESIDUAL: SSE(orig, pred + recon) */
-            long sse_res=0;
-            for(int i=0;i<npw*nph;i++){
-                int val=pred[i]+best_recon[i];
-                if(val<0)val=0; if(val>255)val=255;
-                int d=org_blk[i]-val;
-                sse_res+=d*d;
-            }
-            double rd_res=(double)sse_res+lambda*bits;
-
-            if(rd_skip<rd_res){
-                /* SKIP mode: use prediction directly, no residual */
-                for(int r=0;r<nph;r++)
-                    for(int c=0;c<npw;c++)
-                        recon_out[(by+r)*W+(bx+c)]=pred[r*BS+c];
-            }else{
-                /* RESIDUAL mode: write pred + best recon */
-                *total_bits+=bits;
-                for(int r=0;r<nph;r++)
-                    for(int c=0;c<npw;c++){
-                        int val=pred[r*BS+c]+best_recon[r*BS+c];
+            /* ===== EARLY-SKIP: if prediction is good enough, skip residual ===== */
+            long sse_pred = fast_sse(org_blk, pred, npw*nph);
+            long var = block_variance(org_blk, npw*nph);
+            int do_skip = 0;
+            if(sse_pred < 64 + var/4){
+                /* Prediction is good enough — skip residual coding */
+                double rd_skip = (double)sse_pred + lambda*1;
+                /* Quick estimate: would residual coding help? */
+                /* Only try if prediction error is significant */
+                if(sse_pred > 16){
+                    /* Try 8x8 DCT to see if residual is worth coding */
+                    int16_t coeffs8[64]={0};
+                    wubu_tr_forward(res,coeffs8,BS);
+                    int qshift = eff_qp / 2;
+                    if(qshift < 1) qshift = 1;
+                    double qstep8 = 1 << qshift;
+                    int16_t levels8[64];
+                    wubu_trellis_quantize(coeffs8,64,qstep8,lambda,levels8);
+                    int bits8=0;
+                    for(int i=0;i<64;i++) if(levels8[i]!=0) bits8+=eg_bits(levels8[i]);
+                    int16_t dq8[64], recon8[64];
+                    for(int i=0;i<64;i++) dq8[i]=(int16_t)(levels8[i]*qstep8);
+                    wubu_tr_inverse(dq8,recon8,BS);
+                    long sse8=0;
+                    for(int i=0;i<npw*nph;i++){
+                        int val=pred[i]+recon8[i];
                         if(val<0)val=0; if(val>255)val=255;
-                        recon_out[(by+r)*W+(bx+c)]=(uint8_t)val;
+                        int d=org_blk[i]-val; sse8+=d*d;
                     }
+                    double rd_res=(double)sse8+lambda*bits8;
+                    if(rd_res < rd_skip){
+                        /* RESIDUAL wins — write it */
+                        *total_bits+=bits8;
+                        for(int r=0;r<nph;r++)
+                            for(int c=0;c<npw;c++){
+                                int val=pred[r*BS+c]+recon8[r*BS+c];
+                                if(val<0)val=0; if(val>255)val=255;
+                                recon_out[(by+r)*W+(bx+c)]=(uint8_t)val;
+                            }
+                        do_skip = 2; /* signal: residual was coded */
+                    }
+                }
+                if(do_skip != 2){
+                    /* SKIP mode: use prediction directly */
+                    for(int r=0;r<nph;r++)
+                        for(int c=0;c<npw;c++)
+                            recon_out[(by+r)*W+(bx+c)]=pred[r*BS+c];
+                    do_skip = 1;
+                }
+            }else{
+                /* ===== C9: variable-size transform selection ===== */
+                int qshift = eff_qp / 2;
+                if(qshift < 1) qshift = 1;
+                double qstep8 = 1 << qshift;
+
+                /* candidate 1: 8x8 DCT (baseline) */
+                int16_t coeffs8[64]={0};
+                wubu_tr_forward(res,coeffs8,BS);
+                int16_t levels8[64];
+                wubu_trellis_quantize(coeffs8,64,qstep8,lambda,levels8);
+                int16_t dq8[64], recon8[64];
+                for(int i=0;i<64;i++) dq8[i]=(int16_t)(levels8[i]*qstep8);
+                wubu_tr_inverse(dq8,recon8,BS);
+                int bits8=0;
+                for(int i=0;i<64;i++) if(levels8[i]!=0) bits8+=eg_bits(levels8[i]);
+                long sse8=0;
+                for(int i=0;i<npw*nph;i++){
+                    int val=pred[i]+recon8[i];
+                    if(val<0)val=0; if(val>255)val=255;
+                    int d=org_blk[i]-val; sse8+=d*d;
+                }
+                double rd8=(double)sse8+lambda*bits8;
+
+                /* candidate 2: 4x4 DCT (tile 8x8 block into four 4x4 sub-blocks) */
+                /* Only try if 8x8 residual is still significant */
+                double rd4=1e30;
+                int16_t levels4[64], recon4[64]={0};
+                if(sse8 > npw*nph){
+                    int16_t coeffs4[64]={0};
+                    int16_t sub_in[4][16], sub_out[4][16];
+                    for(int sb=0;sb<4;sb++){
+                        int sy=(sb/2)*4, sx=(sb%2)*4;
+                        for(int r=0;r<4;r++)
+                            for(int c=0;c<4;c++)
+                                sub_in[sb][r*4+c]=(int16_t)res[sy*BS+sx+c];
+                        wubu_tr_forward_size(4,sub_in[sb],sub_out[sb]);
+                    }
+                    for(int sb=0;sb<4;sb++)
+                        for(int i=0;i<16;i++)
+                            coeffs4[sb*16+i]=sub_out[sb][i];
+                    wubu_trellis_quantize(coeffs4,64,qstep8,lambda,levels4);
+                    int16_t dq4[64];
+                    for(int i=0;i<64;i++) dq4[i]=(int16_t)(levels4[i]*qstep8);
+                    for(int sb=0;sb<4;sb++){
+                        int16_t sub_dq[16], sub_recon[16];
+                        for(int i=0;i<16;i++) sub_dq[i]=dq4[sb*16+i];
+                        wubu_tr_inverse_size(4,sub_dq,sub_recon);
+                        int sy=(sb/2)*4, sx=(sb%2)*4;
+                        for(int r=0;r<4;r++)
+                            for(int c=0;c<4;c++)
+                                recon4[sy*BS+sx+c]=sub_recon[r*4+c];
+                    }
+                    int bits4=0;
+                    for(int i=0;i<64;i++) if(levels4[i]!=0) bits4+=eg_bits(levels4[i]);
+                    long sse4=0;
+                    for(int i=0;i<npw*nph;i++){
+                        int val=pred[i]+recon4[i];
+                        if(val<0)val=0; if(val>255)val=255;
+                        int d=org_blk[i]-val; sse4+=d*d;
+                    }
+                    rd4=(double)sse4+lambda*bits4;
+                }
+
+                /* pick best transform: lowest RD cost */
+                int best_tr=0; /* 0=8x8 DCT, 2=4x4 DCT */
+                double rd_best=rd8;
+                int16_t* best_levels=levels8;
+                int16_t* best_recon=recon8;
+
+                if(rd4<rd_best){
+                    rd_best=rd4; best_tr=2; best_levels=levels4;
+                    best_recon=recon4;
+                }
+
+                /* use best transform for reconstruction */
+                int bits=0;
+                for(int i=0;i<64;i++) if(best_levels[i]!=0) bits+=eg_bits(best_levels[i]);
+
+                /* SKIP vs RESIDUAL decision */
+                double rd_skip=(double)sse_pred+lambda*1;
+                double rd_res=(double)rd_best;
+
+                if(rd_skip<rd_res){
+                    /* SKIP mode: use prediction directly, no residual */
+                    for(int r=0;r<nph;r++)
+                        for(int c=0;c<npw;c++)
+                            recon_out[(by+r)*W+(bx+c)]=pred[r*BS+c];
+                }else{
+                    /* RESIDUAL mode: write pred + best recon */
+                    *total_bits+=bits;
+                    for(int r=0;r<nph;r++)
+                        for(int c=0;c<npw;c++){
+                            int val=pred[r*BS+c]+best_recon[r*BS+c];
+                            if(val<0)val=0; if(val>255)val=255;
+                            recon_out[(by+r)*W+(bx+c)]=(uint8_t)val;
+                        }
+                }
             }
         }
     }
@@ -506,6 +696,316 @@ int wubu_encode_frame(const uint8_t* orig,
         }
     }
 
+    if(computed_mv) free(computed_mv);
+    return 0;
+}
+
+/* ===== Encode with preset ===== */
+
+int wubu_encode_frame_preset(const uint8_t* orig,
+                              const uint8_t* ref_past,
+                              const uint8_t* ref_future,
+                              int W, int H, int qp,
+                              wubu_frame_type_t frame_type,
+                              const int16_t* mv_grid,
+                              uint8_t* recon_out,
+                              long* total_bits,
+                              int preset_idx){
+    if(preset_idx < 0) preset_idx = 0;
+    if(preset_idx > 3) preset_idx = 3;
+    
+    const WubuPreset* p = &presets[preset_idx];
+    
+    if(!orig||!recon_out||!total_bits) return -1;
+    if(W<=0||H<=0) return -1;
+    
+    memset(recon_out,0,(size_t)W*H);
+    *total_bits=0;
+    double lambda=wubu_lambda_from_qp(qp,frame_type);
+    
+    /* Compute motion vectors with preset search range */
+    int16_t* computed_mv = NULL;
+    int nbx = W / BS, nby = H / BS;
+    if(mv_grid == NULL && ref_past != NULL && frame_type != WUBU_I_FRAME) {
+        int* mv_buf = malloc((size_t)nbx * nby * 2 * sizeof(int));
+        if(mv_buf) {
+            wubu_me_frame(orig, ref_past, W, H, BS, p->me_search_range, mv_buf);
+            computed_mv = malloc((size_t)nbx * nby * 2 * sizeof(int16_t));
+            if(computed_mv) {
+                for(int i=0;i<nbx*nby*2;i++) computed_mv[i] = (int16_t)mv_buf[i];
+            }
+            free(mv_buf);
+        }
+    }
+    const int16_t* mvs = mv_grid ? mv_grid : computed_mv;
+    
+    int eff_qp = qp;
+    if(p->enable_aq){
+        int aq_offset = wubu_aq_offset(orig, W, H, 0, 0, BS, 4);
+        eff_qp = qp + aq_offset;
+        if(eff_qp < 0) eff_qp = 0;
+        if(eff_qp > 51) eff_qp = 51;
+    }
+    
+    for(int by=0; by<H; by+=BS){
+        for(int bx=0; bx<W; bx+=BS){
+            int npw=BS, nph=BS;
+            if(bx+BS>W) npw=W-bx;
+            if(by+BS>H) nph=H-by;
+            if(npw<=0||nph<=0) continue;
+            
+            if(frame_type==WUBU_I_FRAME){
+                /* I-frame: always full quality */
+                uint8_t org_blk[64]={0};
+                for(int r=0;r<nph;r++)
+                    for(int c=0;c<npw;c++)
+                        org_blk[r*BS+c]=orig[(by+r)*W+(bx+c)];
+                
+                int mode=best_intra_mode(recon_out,org_blk,W,H,bx,by);
+                uint8_t pred[64]={0};
+                intra_predict_y(recon_out,W,H,bx,by,mode,pred);
+                
+                int16_t res[64]={0};
+                for(int i=0;i<npw*nph;i++)
+                    res[i]=(int16_t)((int)org_blk[i]-(int)pred[i]);
+                
+                int16_t coeffs[64]={0};
+                wubu_tr_forward(res,coeffs,BS);
+                int qshift = eff_qp / 2;
+                if(qshift < 1) qshift = 1;
+                int qstep = qshift + 1;
+                int16_t levels[64];
+                for(int i=0;i<64;i++) levels[i] = (int16_t)(coeffs[i] / qstep);
+                
+                int16_t dq[64], recon_blk[64];
+                for(int i=0;i<64;i++) dq[i] = (int16_t)(levels[i] * qstep);
+                wubu_tr_inverse(dq, recon_blk, BS);
+                
+                int bits=0;
+                for(int i=0;i<64;i++)
+                    if(levels[i]!=0) bits+=eg_bits(levels[i]);
+                *total_bits+=bits+4;
+                
+                for(int r=0;r<nph;r++)
+                    for(int c=0;c<npw;c++){
+                        int val=recon_blk[r*BS+c]+pred[r*BS+c];
+                        if(val<0)val=0; if(val>255)val=255;
+                        recon_out[(by+r)*W+(bx+c)]=(uint8_t)val;
+                    }
+                continue;
+            }
+            
+            /* P/B-frame */
+            uint8_t pred[64]={0};
+            uint8_t org_blk[64]={0};
+            for(int r=0;r<nph;r++)
+                for(int c=0;c<npw;c++)
+                    org_blk[r*BS+c]=orig[(by+r)*W+(bx+c)];
+            
+            if(frame_type==WUBU_B_FRAME && ref_past && ref_future && p->enable_bframe_me){
+                uint8_t pred_p[64]={0}, pred_b[64]={0};
+                
+                int mvx_p=0,mvy_p=0;
+                if(mvs){
+                    int idx=by/BS*nbx+bx/BS;
+                    if(idx>=0&&idx<nbx*nby){
+                        mvx_p=mvs[idx*2];
+                        mvy_p=mvs[idx*2+1];
+                    }
+                }
+                mc_pred(ref_past,W,H,mvx_p,mvy_p,bx,by,pred_p);
+                
+                uint8_t p_past[64]={0}, p_future[64]={0};
+                int dx_past, dy_past, dx_future, dy_future;
+                wubu_me_block_fast(orig,ref_past,W,H,bx,by,BS,p->me_search_range,&dx_past,&dy_past,mvs,nbx);
+                wubu_me_block_fast(orig,ref_future,W,H,bx,by,BS,p->me_search_range,&dx_future,&dy_future,mvs,nbx);
+                
+                mc_pred(ref_past,W,H,dx_past,dy_past,bx,by,p_past);
+                mc_pred(ref_future,W,H,dx_future,dy_future,bx,by,p_future);
+                wubu_bp_weighted(p_past,p_future,pred_b,npw*nph,1,1,2);
+                
+                long sse_p=0, sse_b=0;
+                for(int i=0;i<npw*nph;i++){
+                    int d_p=orig[i]-pred_p[i];
+                    int d_b=orig[i]-pred_b[i];
+                    sse_p+=d_p*d_p;
+                    sse_b+=d_b*d_b;
+                }
+                double rd_p=(double)sse_p+lambda*1;
+                double rd_b=(double)sse_b+lambda*2;
+                
+                if(rd_b<rd_p){
+                    for(int i=0;i<npw*nph;i++) pred[i]=pred_b[i];
+                }else{
+                    for(int i=0;i<npw*nph;i++) pred[i]=pred_p[i];
+                }
+            }else if(ref_past){
+                int mvx=0,mvy=0;
+                if(mvs){
+                    int idx=by/BS*nbx+bx/BS;
+                    if(idx>=0&&idx<nbx*nby){
+                        mvx=mvs[idx*2];
+                        mvy=mvs[idx*2+1];
+                    }
+                }
+                mc_pred(ref_past,W,H,mvx,mvy,bx,by,pred);
+            }else{
+                inter_pred_plane(NULL,W,H,bx,by,pred);
+            }
+            
+            int16_t res[64]={0};
+            for(int i=0;i<npw*nph;i++)
+                res[i]=(int16_t)((int)org_blk[i]-(int)pred[i]);
+            
+            /* Early skip */
+            long sse_pred = fast_sse(org_blk, pred, npw*nph);
+            long var = block_variance(org_blk, npw*nph);
+            
+            if(p->enable_early_skip && sse_pred < 64 + var/4){
+                double rd_skip = (double)sse_pred + lambda*1;
+                int do_skip = 0;
+                
+                if(sse_pred > 16){
+                    int16_t coeffs8[64]={0};
+                    wubu_tr_forward(res,coeffs8,BS);
+                    int qshift = eff_qp / 2;
+                    if(qshift < 1) qshift = 1;
+                    double qstep8 = 1 << qshift;
+                    int16_t levels8[64];
+                    wubu_trellis_quantize(coeffs8,64,qstep8,lambda,levels8);
+                    int bits8=0;
+                    for(int i=0;i<64;i++) if(levels8[i]!=0) bits8+=eg_bits(levels8[i]);
+                    int16_t dq8[64], recon8[64];
+                    for(int i=0;i<64;i++) dq8[i]=(int16_t)(levels8[i]*qstep8);
+                    wubu_tr_inverse(dq8,recon8,BS);
+                    long sse8=0;
+                    for(int i=0;i<npw*nph;i++){
+                        int val=pred[i]+recon8[i];
+                        if(val<0)val=0; if(val>255)val=255;
+                        int d=org_blk[i]-val; sse8+=d*d;
+                    }
+                    double rd_res=(double)sse8+lambda*bits8;
+                    if(rd_res < rd_skip){
+                        *total_bits+=bits8;
+                        for(int r=0;r<nph;r++)
+                            for(int c=0;c<npw;c++){
+                                int val=pred[r*BS+c]+recon8[r*BS+c];
+                                if(val<0)val=0; if(val>255)val=255;
+                                recon_out[(by+r)*W+(bx+c)]=(uint8_t)val;
+                            }
+                        do_skip = 2;
+                    }
+                }
+                if(do_skip != 2){
+                    for(int r=0;r<nph;r++)
+                        for(int c=0;c<npw;c++)
+                            recon_out[(by+r)*W+(bx+c)]=pred[r*BS+c];
+                }
+            }else{
+                /* Full transform selection */
+                int qshift = eff_qp / 2;
+                if(qshift < 1) qshift = 1;
+                double qstep8 = 1 << qshift;
+                
+                int16_t coeffs8[64]={0};
+                wubu_tr_forward(res,coeffs8,BS);
+                int16_t levels8[64];
+                wubu_trellis_quantize(coeffs8,64,qstep8,lambda,levels8);
+                int16_t dq8[64], recon8[64];
+                for(int i=0;i<64;i++) dq8[i]=(int16_t)(levels8[i]*qstep8);
+                wubu_tr_inverse(dq8,recon8,BS);
+                int bits8=0;
+                for(int i=0;i<64;i++) if(levels8[i]!=0) bits8+=eg_bits(levels8[i]);
+                long sse8=0;
+                for(int i=0;i<npw*nph;i++){
+                    int val=pred[i]+recon8[i];
+                    if(val<0)val=0; if(val>255)val=255;
+                    int d=org_blk[i]-val; sse8+=d*d;
+                }
+                double rd8=(double)sse8+lambda*bits8;
+                
+                double rd_best=rd8;
+                int16_t* best_levels=levels8;
+                int16_t* best_recon=recon8;
+                
+                /* Try 4x4 only if enabled and 8x8 residual is significant */
+                if(p->max_transforms >= 2 && sse8 > npw*nph){
+                    int16_t coeffs4[64]={0};
+                    int16_t sub_in[4][16], sub_out[4][16];
+                    for(int sb=0;sb<4;sb++){
+                        int sy=(sb/2)*4, sx=(sb%2)*4;
+                        for(int r=0;r<4;r++)
+                            for(int c=0;c<4;c++)
+                                sub_in[sb][r*4+c]=(int16_t)res[sy*BS+sx+c];
+                        wubu_tr_forward_size(4,sub_in[sb],sub_out[sb]);
+                    }
+                    for(int sb=0;sb<4;sb++)
+                        for(int i=0;i<16;i++)
+                            coeffs4[sb*16+i]=sub_out[sb][i];
+                    int16_t levels4[64];
+                    wubu_trellis_quantize(coeffs4,64,qstep8,lambda,levels4);
+                    int16_t dq4[64];
+                    for(int i=0;i<64;i++) dq4[i]=(int16_t)(levels4[i]*qstep8);
+                    int16_t recon4[64]={0};
+                    for(int sb=0;sb<4;sb++){
+                        int16_t sub_dq[16], sub_recon[16];
+                        for(int i=0;i<16;i++) sub_dq[i]=dq4[sb*16+i];
+                        wubu_tr_inverse_size(4,sub_dq,sub_recon);
+                        int sy=(sb/2)*4, sx=(sb%2)*4;
+                        for(int r=0;r<4;r++)
+                            for(int c=0;c<4;c++)
+                                recon4[sy*BS+sx+c]=sub_recon[r*4+c];
+                    }
+                    int bits4=0;
+                    for(int i=0;i<64;i++) if(levels4[i]!=0) bits4+=eg_bits(levels4[i]);
+                    long sse4=0;
+                    for(int i=0;i<npw*nph;i++){
+                        int val=pred[i]+recon4[i];
+                        if(val<0)val=0; if(val>255)val=255;
+                        int d=org_blk[i]-val; sse4+=d*d;
+                    }
+                    double rd4=(double)sse4+lambda*bits4;
+                    if(rd4<rd_best){
+                        rd_best=rd4; best_levels=levels4; best_recon=recon4;
+                    }
+                }
+                
+                int bits=0;
+                for(int i=0;i<64;i++) if(best_levels[i]!=0) bits+=eg_bits(best_levels[i]);
+                
+                double rd_skip=(double)sse_pred+lambda*1;
+                double rd_res=(double)rd_best;
+                
+                if(rd_skip<rd_res){
+                    for(int r=0;r<nph;r++)
+                        for(int c=0;c<npw;c++)
+                            recon_out[(by+r)*W+(bx+c)]=pred[r*BS+c];
+                }else{
+                    *total_bits+=bits;
+                    for(int r=0;r<nph;r++)
+                        for(int c=0;c<npw;c++){
+                            int val=pred[r*BS+c]+best_recon[r*BS+c];
+                            if(val<0)val=0; if(val>255)val=255;
+                            recon_out[(by+r)*W+(bx+c)]=(uint8_t)val;
+                        }
+                }
+            }
+        }
+    }
+    
+    *total_bits+=8;
+    wubu_db_filter_plane(recon_out, W, H, qp);
+    {
+        int band_offsets[4] = {0};
+        wubu_sao_band_estimate(orig, recon_out, W, H, 0, band_offsets, 4);
+        wubu_sao_band(recon_out, recon_out, W, H, 0, band_offsets, 4);
+        for (int dir = 0; dir < 4; dir++) {
+            int eo_offsets[5] = {0};
+            wubu_sao_edge_estimate(orig, recon_out, W, H, dir, eo_offsets);
+            wubu_sao_edge(recon_out, recon_out, W, H, dir, eo_offsets);
+        }
+    }
+    
     if(computed_mv) free(computed_mv);
     return 0;
 }

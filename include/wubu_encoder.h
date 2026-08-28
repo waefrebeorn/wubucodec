@@ -37,6 +37,17 @@ int wubu_rd_curve(const uint8_t* orig,
 int wubu_encode_gop8(const uint8_t* frames,int W,int H,int base_qp,
                       uint8_t* recon_frames,long* total_bits);
 
+/* Encode with preset (0=ultrafast, 1=fast, 2=medium, 3=slow) */
+int wubu_encode_frame_preset(const uint8_t* orig,
+                              const uint8_t* ref_past,
+                              const uint8_t* ref_future,
+                              int W, int H, int qp,
+                              wubu_frame_type_t frame_type,
+                              const int16_t* mv_grid,
+                              uint8_t* recon_out,
+                              long* total_bits,
+                              int preset_idx);
+
 #ifdef __cplusplus
 }
 #endif

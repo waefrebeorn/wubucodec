@@ -17,19 +17,52 @@
 #include <string.h>
 #include <math.h>
 
+#if defined(__AVX2__)
+#include <immintrin.h>
+#elif defined(__SSE4_1__)
+#include <smmintrin.h>
+#endif
+
 /* SAD between a block in curr at (bx,by) and ref at (bx+dx,by+dy) */
+/* Uses SIMD for in-bounds case, scalar for boundary check */
 long wubu_me_sad(const uint8_t* curr,const uint8_t* ref,
                     int W,int H,int bx,int by,int bs,int dx,int dy){
-    long sad=0;
-    for(int r=0;r<bs;r++){
-        int cy=by+r;
-        int ry=cy+dy;
-        if(ry<0||ry>=H){return 1LL<<30;}
-        for(int c=0;c<bs;c++){
-            int cx=bx+c;
-            int rx=cx+dx;
-            if(rx<0||rx>=W){sad+=(1<<20);continue;}
-            sad+=abs(curr[cy*W+cx]-ref[ry*W+rx]);
+    /* Fast path: fully in-bounds */
+    int rx = bx + dx;
+    int ry = by + dy;
+    if(rx >= 0 && ry >= 0 && rx + bs <= W && ry + bs <= H){
+        long sad = 0;
+        for(int r = 0; r < bs; r++){
+            const uint8_t* cp = curr + (by + r) * W + bx;
+            const uint8_t* rp = ref + (ry + r) * W + rx;
+            int c = 0;
+#if defined(__AVX2__)
+            /* Process 8 rows, 8 cols each = 64 bytes per row */
+            for(; c + 8 <= bs; c += 8){
+                __m128i vc = _mm_loadl_epi64((const __m128i*)(cp + c));
+                __m128i vr = _mm_loadl_epi64((const __m128i*)(rp + c));
+                __m128i sad8 = _mm_sad_epu8(vc, vr);
+                sad += _mm_extract_epi64(sad8, 0);
+            }
+#endif
+            for(; c < bs; c++){
+                sad += abs((int)cp[c] - (int)rp[c]);
+            }
+        }
+        return sad;
+    }
+    
+    /* Slow path: boundary check per pixel */
+    long sad = 0;
+    for(int r = 0; r < bs; r++){
+        int cy = by + r;
+        int ry2 = cy + dy;
+        if(ry2 < 0 || ry2 >= H) return 1LL << 30;
+        for(int c = 0; c < bs; c++){
+            int cx = bx + c;
+            int rx2 = cx + dx;
+            if(rx2 < 0 || rx2 >= W){sad += (1 << 20); continue;}
+            sad += abs(curr[cy * W + cx] - ref[ry2 * W + rx2]);
         }
     }
     return sad;

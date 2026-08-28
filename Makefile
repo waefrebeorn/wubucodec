@@ -149,6 +149,12 @@ test-gap: $(BIN)/wubu_gap_closure
 test-c4: $(BIN)/test_wubu_coeff
 	./$(BIN)/test_wubu_coeff
 
+test-speed: $(BIN)/wubu_speed_bench
+	./$(BIN)/wubu_speed_bench
+
+test-preset: $(BIN)/wubu_preset_bench
+	./$(BIN)/wubu_preset_bench
+
 # Clean
 clean:
 	rm -rf $(OBJ) $(BIN)
