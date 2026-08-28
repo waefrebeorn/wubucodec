@@ -5,6 +5,13 @@
  * G7.03: 32×32 integer DCT (HEVC/VVC)
  * G7.05: Transform skip mode (identity)
  * G7.09: Quantization matrices per size/type
+ *
+ * Uses correct orthonormal DCT-II (the standard for JPEG/H.264/HEVC):
+ *   Forward: Y(u,v) = c(u)*c(v) * sum_{x,y} X(x,y) * cos((2x+1)*u*pi/16) * cos((2y+1)*v*pi/16)
+ *   Inverse: X(x,y) = sum_{u,v} c(u)*c(v) * Y(u,v) * cos((2x+1)*u*pi/16) * cos((2y+1)*v*pi/16)
+ * where c(0) = sqrt(1/8), c(k) = sqrt(2/8) for k > 0
+ *
+ * This is orthonormal: inverse(forward(x)) == x (within float precision)
  */
 #define M_PI 3.14159265358979f
 #include "wubu_transform.h"
@@ -12,111 +19,68 @@
 #include <string.h>
 #include <math.h>
 
-/* Forward declarations */
-static void dct_basis(int n, double* mat);
-static void dct_forward_n(const double* basis, const int16_t* input, int16_t* output, int n);
-static void dct_inverse_n(const double* basis, const int16_t* coeff, int16_t* output, int n);
+#define BS 8
 
-/* ===== Fast 8x8 Integer DCT (AAN algorithm) ===== */
-/* Uses integer multiplications and shifts - no float matrix multiply */
+static float dct_basis[BS][BS][BS][BS];  // [u][v][x][y]
+static int basis_ready = 0;
 
-static const int C1 = 401;   /* cos(pi/16) * 256 */
-static const int C2 = 378;   /* cos(2*pi/16) * 256 */
-static const int C3 = 340;   /* cos(3*pi/16) * 256 */
-static const int C5 = 251;   /* cos(5*pi/16) * 256 */
-static const int C6 = 196;   /* cos(6*pi/16) * 256 */
-static const int C7 = 98;    /* cos(7*pi/16) * 256 */
-
-/* 1D 8-point DCT (AAN fast algorithm) */
-static void dct_1d_8(const int16_t* in, int16_t* out) {
-    int x0 = in[0], x1 = in[7], x2 = in[1], x3 = in[6];
-    int x4 = in[2], x5 = in[5], x6 = in[3], x7 = in[4];
+static void init_dct_basis() {
+    if(basis_ready) return;
     
-    int a0 = x0 + x7, a1 = x1 + x6, a2 = x2 + x5, a3 = x3 + x4;
-    int a4 = x3 - x4, a5 = x2 - x5, a6 = x1 - x6, a7 = x0 - x7;
-    
-    int b0 = a0 + a3, b1 = a1 + a2, b2 = a1 - a2, b3 = a0 - a3;
-    
-    out[0] = (int16_t)((b0 + b1) >> 1);
-    out[4] = (int16_t)((b0 - b1) >> 1);
-    out[2] = (int16_t)((b2 * C6 + b3 * C2) >> 8);
-    out[6] = (int16_t)((b3 * C6 - b2 * C2) >> 8);
-    
-    int c0 = a4 * C7 + a7 * C1;
-    int c1 = a5 * C3 + a6 * C5;
-    int c2 = a5 * C5 - a6 * C3;
-    int c3 = a4 * C1 - a7 * C7;
-    
-    out[1] = (int16_t)((c0 + c1) >> 8);
-    out[3] = (int16_t)((c2 + c3) >> 8);
-    out[5] = (int16_t)((c0 - c1) >> 8);
-    out[7] = (int16_t)((c3 - c2) >> 8);
+    for(int u = 0; u < BS; u++) {
+        for(int v = 0; v < BS; v++) {
+            float cu = (u == 0) ? sqrtf(1.0f/BS) : sqrtf(2.0f/BS);
+            float cv = (v == 0) ? sqrtf(1.0f/BS) : sqrtf(2.0f/BS);
+            
+            for(int x = 0; x < BS; x++) {
+                for(int y = 0; y < BS; y++) {
+                    dct_basis[u][v][x][y] = cu * cv * 
+                        cosf((2*x+1)*u*M_PI/(2*BS)) * 
+                        cosf((2*y+1)*v*M_PI/(2*BS));
+                }
+            }
+        }
+    }
+    basis_ready = 1;
 }
 
-/* 1D 8-point inverse DCT */
-static void idct_1d_8(const int16_t* in, int16_t* out) {
-    int c0 = in[0] + in[4];
-    int c1 = in[0] - in[4];
-    int c2 = (in[2] * C6 - in[6] * C2) >> 8;
-    int c3 = (in[6] * C6 + in[2] * C2) >> 8;
-    
-    int a0 = c0 + c3, a1 = c1 + c2, a2 = c1 - c2, a3 = c0 - c3;
-    
-    int b1 = in[1] + in[7], b3 = in[3] + in[5];
-    int b5 = in[1] - in[7], b7 = in[3] - in[5];
-    
-    int d1 = b1 + b3, d3 = b1 - b3;
-    
-    int e1 = (b5 * C3 + b7 * C5) >> 8;
-    int e3 = (b5 * C5 - b7 * C3) >> 8;
-    int e5 = (b1 * C7 + b3 * C1) >> 8;
-    int e7 = (b1 * C1 - b3 * C7) >> 8;
-    
-    int f1 = e1 + e5, f3 = e3 + e7;
-    int g1 = e1 - e5, g3 = e3 - e7;
-    
-    out[0] = (int16_t)((a0 + d1) >> 1);
-    out[7] = (int16_t)((a0 - d1) >> 1);
-    out[1] = (int16_t)((a1 + f1) >> 1);
-    out[6] = (int16_t)((a1 - f1) >> 1);
-    out[2] = (int16_t)((a2 + f3) >> 1);
-    out[5] = (int16_t)((a2 - f3) >> 1);
-    out[3] = (int16_t)((a3 + g1) >> 1);
-    out[4] = (int16_t)((a3 - g1) >> 1);
-}
-
-/* 2D 8x8 DCT: row pass then column pass */
+/* 2D 8x8 DCT using correct orthonormal basis */
 static void dct_8x8_int(const int16_t* input, int16_t* output) {
-    int16_t tmp[64];
+    init_dct_basis();
     
-    /* Row pass */
-    for(int y = 0; y < 8; y++)
-        dct_1d_8(input + y*8, tmp + y*8);
-    
-    /* Column pass */
-    int16_t col[8], out_col[8];
-    for(int x = 0; x < 8; x++) {
-        for(int y = 0; y < 8; y++) col[y] = tmp[y*8 + x];
-        dct_1d_8(col, out_col);
-        for(int y = 0; y < 8; y++) output[y*8 + x] = out_col[y];
+    for(int u = 0; u < BS; u++) {
+        for(int v = 0; v < BS; v++) {
+            float sum = 0;
+            for(int x = 0; x < BS; x++) {
+                for(int y = 0; y < BS; y++) {
+                    sum += input[x*BS+y] * dct_basis[u][v][x][y];
+                }
+            }
+            output[u*BS+v] = (int16_t)roundf(sum);
+        }
     }
 }
 
 static void idct_8x8_int(const int16_t* input, int16_t* output) {
-    int16_t tmp[64];
+    init_dct_basis();
     
-    /* Row pass */
-    for(int y = 0; y < 8; y++)
-        idct_1d_8(input + y*8, tmp + y*8);
-    
-    /* Column pass */
-    int16_t col[8], out_col[8];
-    for(int x = 0; x < 8; x++) {
-        for(int y = 0; y < 8; y++) col[y] = tmp[y*8 + x];
-        idct_1d_8(col, out_col);
-        for(int y = 0; y < 8; y++) output[y*8 + x] = out_col[y];
+    for(int x = 0; x < BS; x++) {
+        for(int y = 0; y < BS; y++) {
+            float sum = 0;
+            for(int u = 0; u < BS; u++) {
+                for(int v = 0; v < BS; v++) {
+                    sum += input[u*BS+v] * dct_basis[u][v][x][y];
+                }
+            }
+            output[x*BS+y] = (int16_t)roundf(sum);
+        }
     }
 }
+
+/* Forward declarations for generic NxN */
+static void dct_basis_gen(int n, double* mat);
+static void dct_forward_n(const double* basis, const int16_t* input, int16_t* output, int n);
+static void dct_inverse_n(const double* basis, const int16_t* coeff, int16_t* output, int n);
 
 /* ===== Public API ===== */
 
@@ -127,7 +91,7 @@ void wubu_tr_forward(const int16_t* input, int16_t* output, int size) {
     }
     /* Fallback for other sizes */
     double basis[size*size];
-    dct_basis(size, basis);
+    dct_basis_gen(size, basis);
     dct_forward_n(basis, input, output, size);
 }
 
@@ -138,14 +102,14 @@ void wubu_tr_inverse(const int16_t* coeff, int16_t* output, int size) {
     }
     /* Fallback for other sizes */
     double basis[size*size];
-    dct_basis(size, basis);
+    dct_basis_gen(size, basis);
     dct_inverse_n(basis, coeff, output, size);
 }
 
 /* ===== Generic N×N float DCT via matrix multiplication ===== */
 
 /* precompute DCT basis matrix for given size */
-static void dct_basis(int n, double* mat) {
+static void dct_basis_gen(int n, double* mat) {
     /* C(u) = c(u) * cos((2x+1)*u*pi/(2n)) where c(0)=sqrt(1/n), c(u)=sqrt(2/n) */
     for(int u = 0; u < n; u++) {
         double cu = (u == 0) ? sqrt(1.0/n) : sqrt(2.0/n);
@@ -231,36 +195,36 @@ static void dst7_inverse_4x4(const double* basis, const int16_t* coeff, int16_t*
 /* 4x4 DCT — small block for high-frequency/detail regions */
 static void dct4_forward(const int16_t* input, int16_t* output) {
     static double basis4[16]; static int b4r = 0;
-    if(!b4r) {dct_basis(4, basis4); b4r = 1;}
+    if(!b4r) {dct_basis_gen(4, basis4); b4r = 1;}
     dct_forward_n(basis4, input, output, 4);
 }
 static void dct4_inverse(const int16_t* coeff, int16_t* output) {
     static double basis4[16]; static int b4r = 0;
-    if(!b4r) {dct_basis(4, basis4); b4r = 1;}
+    if(!b4r) {dct_basis_gen(4, basis4); b4r = 1;}
     dct_inverse_n(basis4, coeff, output, 4);
 }
 
 /* 16x16 DCT — large block for smooth regions */
 static void dct16_forward(const int16_t* input, int16_t* output) {
     static double basis16[256]; static int b16r = 0;
-    if(!b16r) {dct_basis(16, basis16); b16r = 1;}
+    if(!b16r) {dct_basis_gen(16, basis16); b16r = 1;}
     dct_forward_n(basis16, input, output, 16);
 }
 static void dct16_inverse(const int16_t* coeff, int16_t* output) {
     static double basis16[256]; static int b16r = 0;
-    if(!b16r) {dct_basis(16, basis16); b16r = 1;}
+    if(!b16r) {dct_basis_gen(16, basis16); b16r = 1;}
     dct_inverse_n(basis16, coeff, output, 16);
 }
 
 /* 32x32 DCT — very large block for very smooth regions (HEVC/VVC 32x32) */
 static void dct32_forward(const int16_t* input, int16_t* output) {
     static double basis32[1024]; static int b32r = 0;
-    if(!b32r) {dct_basis(32, basis32); b32r = 1;}
+    if(!b32r) {dct_basis_gen(32, basis32); b32r = 1;}
     dct_forward_n(basis32, input, output, 32);
 }
 static void dct32_inverse(const int16_t* coeff, int16_t* output) {
     static double basis32[1024]; static int b32r = 0;
-    if(!b32r) {dct_basis(32, basis32); b32r = 1;}
+    if(!b32r) {dct_basis_gen(32, basis32); b32r = 1;}
     dct_inverse_n(basis32, coeff, output, 32);
 }
 

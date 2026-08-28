@@ -55,7 +55,7 @@ static int has_top_y(const uint8_t* img,int W,int H,int bx,int by){
 static void ip_dc_y(const uint8_t* img,int W,int H,int bx,int by,uint8_t* blk){
     int sum=0,cnt=0;
     if(bx>0) for(int r=0;r<BS;r++){int y=by*BS+r; if(y<H){sum+=img[y*W+bx-1];cnt++;}}
-    if(by>0) for(int c=0;c<BS;c++){int x=bx*BS+c; if(x<W){sum+=img[(by-1)*BS*8+c];cnt++;}}
+    if(by>0) for(int c=0;c<BS;c++){int x=bx*BS+c; if(x<W){sum+=img[(by-1)*W+x];cnt++;}}
     uint8_t dc=cnt>0?(uint8_t)(sum/cnt):128;
     for(int i=0;i<64;i++)blk[i]=dc;
 }
@@ -64,7 +64,7 @@ static void ip_dc_y(const uint8_t* img,int W,int H,int bx,int by,uint8_t* blk){
 static void ip_vert_y(const uint8_t* img,int W,int H,int bx,int by,uint8_t* blk){
     if(by==0){ip_dc_y(img,W,H,bx,by,blk);return;}
     for(int c=0;c<BS;c++){int x=bx*BS+c; if(x>=W)break;
-        uint8_t v=img[(by-1)*BS*8+c];
+        uint8_t v=img[(by-1)*W+x];
         for(int r=0;r<BS;r++)blk[r*BS+c]=v;
     }
 }
@@ -81,10 +81,10 @@ static void ip_horiz_y(const uint8_t* img,int W,int H,int bx,int by,uint8_t* blk
 /* Plane: weighted extrapolation from top-left corner */
 static void ip_plane_y(const uint8_t* img,int W,int H,int bx,int by,uint8_t* blk){
     if(bx==0||by==0){ip_vert_y(img,W,H,bx,by,blk);return;}
-    uint8_t corner=img[(by-1)*BS*8+bx-1];
+    uint8_t corner=img[(by-1)*W+bx-1];
     int gh=0,gv=0,n=0;
-    for(int c=0;c<BS&&bx-1+c<W;c++){gh+=img[(by-1)*BS*8+bx-1+c]-corner;n++;}
-    for(int r=0;r<BS&&by-1+r<H;r++){gv+=img[(by-1+r)*BS*8+bx-1]-corner;n++;}
+    for(int c=0;c<BS&&bx+c<W;c++){gh+=img[(by-1)*W+bx+c]-corner;n++;}
+    for(int r=0;r<BS&&by+r<H;r++){gv+=img[(by+r)*W+bx-1]-corner;n++;}
     if(n>0){gh/=n;gv/=n;}
     for(int r=0;r<BS;r++)for(int c=0;c<BS;c++){
         int v=corner+gh*(c+1)/BS+gv*(r+1)/BS;
