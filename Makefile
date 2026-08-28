@@ -143,6 +143,9 @@ test-c12: $(BIN)/test_wubu_deblock2
 test-c1: $(BIN)/test_wubu_cabac
 	./$(BIN)/test_wubu_cabac
 
+test-gap: $(BIN)/wubu_gap_closure
+	./$(BIN)/wubu_gap_closure
+
 test-c4: $(BIN)/test_wubu_coeff
 	./$(BIN)/test_wubu_coeff
 
