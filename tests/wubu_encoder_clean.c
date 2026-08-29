@@ -21,7 +21,7 @@
 
 #define BS 8
 #define DEFAULT_GOP 30
-#define SCENE_CHANGE_THRESHOLD 0.15
+#define SCENE_CHANGE_THRESHOLD 0.5
 
 /* ============================================================
  * DCT (orthonormal DCT-II)
@@ -235,9 +235,10 @@ static void deblock_frame(uint8_t* recon, int W, int H, int qp) {
 
 static float frame_difference(const uint8_t* a, const uint8_t* b, int n) {
     long diff = 0;
-    for (int i = 0; i < n; i++)
+    int step = 4; /* Sample every 4th pixel for speed */
+    for (int i = 0; i < n; i += step)
         diff += abs((int)a[i] - (int)b[i]);
-    return (float)diff / n;
+    return (float)diff / (n / step);
 }
 
 /* ============================================================
@@ -463,15 +464,15 @@ static double compute_psnr(const uint8_t* a, const uint8_t* b, int n) {
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        printf("Usage: %s input.raw [num_frames] [qp]\n", argv[0]);
+        printf("Usage: %s input.raw [num_frames] [qp] [width] [height]\n", argv[0]);
         return 1;
     }
     
     const char* input = argv[1];
     int num_frames = (argc > 2) ? atoi(argv[2]) : 100;
     int qp = (argc > 3) ? atoi(argv[3]) : 26;
-    
-    int W = 320, H = 240;
+    int W = (argc > 4) ? atoi(argv[4]) : 320;
+    int H = (argc > 5) ? atoi(argv[5]) : 240;
     int np = W * H;
     
     printf("=== Clean Encoder Test ===\n");
@@ -499,12 +500,14 @@ int main(int argc, char** argv) {
     
     uint8_t* recon = malloc(np);
     uint8_t* prev_recon = malloc(np);
+    uint8_t* prev_orig = malloc(np);
     int16_t* mvs = malloc(W / 8 * H / 8 * 2 * sizeof(int16_t));
     
     double total_psnr = 0;
     int total_iframes = 0, total_pframes = 0;
     
     memset(prev_recon, 0, np);
+    memset(prev_orig, 0, np);
     
     FILE* fout = fopen("/tmp/clean_encoded.raw", "wb");
     
@@ -512,14 +515,16 @@ int main(int argc, char** argv) {
         uint8_t* orig = frames + fnum * np;
         uint8_t* ref = (fnum > 0) ? prev_recon : NULL;
         
-        /* Scene change detection */
+        /* Scene change detection — compare against previous ORIGINAL frame */
         int is_iframe = 0;
         if (fnum == 0) {
             is_iframe = 1;
         } else if (fnum % params.gop == 0) {
             is_iframe = 1;
-        } else {
-            float diff = frame_difference(orig, prev_recon, np);
+        } else if (prev_orig != NULL) {
+            float diff = frame_difference(orig, prev_orig, np);
+            if (fnum < 10)
+                printf("  Frame %d: diff=%.2f, threshold=%.2f\n", fnum, diff, SCENE_CHANGE_THRESHOLD * 128);
             if (diff > SCENE_CHANGE_THRESHOLD * 128) {
                 is_iframe = 1;
             }
@@ -543,6 +548,7 @@ int main(int argc, char** argv) {
         
         fwrite(recon, 1, np, fout);
         memcpy(prev_recon, recon, np);
+        memcpy(prev_orig, orig, np);
     }
     
     fclose(fout);
@@ -555,6 +561,7 @@ int main(int argc, char** argv) {
     free(frames);
     free(recon);
     free(prev_recon);
+    free(prev_orig);
     free(mvs);
     
     return 0;
