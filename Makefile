@@ -16,6 +16,7 @@ LIB_SRCS = \
     $(SRC)/motion/wubu_motionest.c \
     $(SRC)/audio/wubu_stft.c \
     $(SRC)/audio/wubu_kodak.c \
+    $(SRC)/entropy/wubu_entropy.c \
     $(SRC)/container/wubuv.c
 
 LIB_OBJS = $(patsubst $(SRC)/%.c,$(OBJ)/%.o,$(LIB_SRCS))
@@ -24,7 +25,7 @@ LIB_OBJS = $(patsubst $(SRC)/%.c,$(OBJ)/%.o,$(LIB_SRCS))
 all: dirs $(BIN)/libwubuv.a $(BIN)/wubuv_encode $(BIN)/wubuv_decode $(BIN)/wubuv_play $(BIN)/wubuv_info $(BIN)/wubuv_verify
 
 dirs:
-	@mkdir -p $(BIN) $(OBJ)/transform $(OBJ)/motion $(OBJ)/audio $(OBJ)/container $(OBJ)/tools
+	@mkdir -p $(BIN) $(OBJ)/transform $(OBJ)/motion $(OBJ)/audio $(OBJ)/container $(OBJ)/entropy $(OBJ)/tools
 
 # Static library
 $(BIN)/libwubuv.a: $(LIB_OBJS)
@@ -49,10 +50,6 @@ $(BIN)/wubuv_info: tools/wubuv_info.c $(LIB_OBJS)
 	$(CC) $(CFLAGS) $< $(LIB_OBJS) -o $@ $(LDFLAGS)
 
 $(BIN)/wubuv_verify: tools/wubuv_verify.c $(LIB_OBJS)
-	$(CC) $(CFLAGS) $< $(LIB_OBJS) -o $@ $(LDFLAGS)
-
-# Benchmark tools
-$(BIN)/wubuv_bench: tools/wubuv_bench.c $(LIB_OBJS)
 	$(CC) $(CFLAGS) $< $(LIB_OBJS) -o $@ $(LDFLAGS)
 
 # Clean
