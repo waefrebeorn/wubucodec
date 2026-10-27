@@ -26,6 +26,10 @@ long wubu_cabac_finish(WuBuCabacEnc* e);
 void wubu_cabac_init_contexts(CabacContext* contexts,int n_contexts,
                                int init_value,int qp);
 
+/* Block-level API: encode/estimate a block of quantized coefficients */
+int cabac_encode_block(int16_t* levels, int num_coeffs, uint8_t* output, int output_size);
+int cabac_bits_estimate(int16_t* levels, int num_coeffs);
+
 /* ===== Decoder (C1) ===== */
 typedef struct {
     uint8_t* buf;

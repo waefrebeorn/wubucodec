@@ -1,43 +1,43 @@
-# WuBuCodec — Complete Build System
-# Builds: library, tools, player, and benchmarks
-
+# WuBuCodec — Build with arithmetic coding
 CC = gcc
 CFLAGS = -std=c11 -O3 -march=native -Iinclude -Wall -Wno-unused-function
 LDFLAGS = -lm -lpthread -lz
 
 SRC = src
-INC = include
 OBJ = build
 BIN = bin
 
-# Core library sources
 LIB_SRCS = \
     $(SRC)/transform/wubu_transform.c \
     $(SRC)/motion/wubu_motionest.c \
     $(SRC)/audio/wubu_stft.c \
     $(SRC)/audio/wubu_kodak.c \
     $(SRC)/entropy/wubu_entropy.c \
+    $(SRC)/entropy/wubu_cabac.c \
+    $(SRC)/entropy/wubu_ac.c \
     $(SRC)/container/wubuv.c
 
 LIB_OBJS = $(patsubst $(SRC)/%.c,$(OBJ)/%.o,$(LIB_SRCS))
 
-# Targets
-all: dirs $(BIN)/libwubuv.a $(BIN)/wubuv_encode $(BIN)/wubuv_decode $(BIN)/wubuv_play $(BIN)/wubuv_info $(BIN)/wubuv_verify
+all: dirs $(BIN)/wubuv_encode $(BIN)/wubuv_decode $(BIN)/wubuv_play $(BIN)/wubuv_info $(BIN)/wubuv_verify $(BIN)/wubuv_encode_v7 $(BIN)/wubuv_encode_v8 $(BIN)/wubu_latent_codec $(BIN)/wubu_canvas_engine
 
 dirs:
-	@mkdir -p $(BIN) $(OBJ)/transform $(OBJ)/motion $(OBJ)/audio $(OBJ)/container $(OBJ)/entropy $(OBJ)/tools
+	@mkdir -p $(BIN) $(OBJ)/transform $(OBJ)/motion $(OBJ)/audio $(OBJ)/entropy $(OBJ)/container
 
-# Static library
-$(BIN)/libwubuv.a: $(LIB_OBJS)
-	ar rcs $@ $^
-
-# Library object files
 $(OBJ)/%.o: $(SRC)/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-# Tools
 $(BIN)/wubuv_encode: tools/wubuv_encode.c $(LIB_OBJS)
+	$(CC) $(CFLAGS) $< $(LIB_OBJS) -o $@ $(LDFLAGS)
+
+$(BIN)/wubuv_encode_v7: tools/wubuv_encode_v7.c $(LIB_OBJS)
+	$(CC) $(CFLAGS) $< $(LIB_OBJS) -o $@ $(LDFLAGS)
+
+$(BIN)/wubuv_encode_v8: tools/wubuv_encode_v8.c $(LIB_OBJS)
+	$(CC) $(CFLAGS) $< $(LIB_OBJS) -o $@ $(LDFLAGS)
+
+$(BIN)/wubu_latent_codec: tools/wubu_latent_codec.c $(LIB_OBJS)
 	$(CC) $(CFLAGS) $< $(LIB_OBJS) -o $@ $(LDFLAGS)
 
 $(BIN)/wubuv_decode: tools/wubuv_decode.c $(LIB_OBJS)
@@ -52,16 +52,7 @@ $(BIN)/wubuv_info: tools/wubuv_info.c $(LIB_OBJS)
 $(BIN)/wubuv_verify: tools/wubuv_verify.c $(LIB_OBJS)
 	$(CC) $(CFLAGS) $< $(LIB_OBJS) -o $@ $(LDFLAGS)
 
-# Clean
 clean:
 	rm -rf $(OBJ) $(BIN)
 
-# Install
-install: all
-	cp $(BIN)/wubuv_encode /usr/local/bin/
-	cp $(BIN)/wubuv_decode /usr/local/bin/
-	cp $(BIN)/wubuv_play /usr/local/bin/
-	cp $(BIN)/wubuv_info /usr/local/bin/
-	cp $(BIN)/wubuv_verify /usr/local/bin/
-
-.PHONY: all dirs clean install
+.PHONY: all dirs clean
