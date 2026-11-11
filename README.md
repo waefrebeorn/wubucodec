@@ -16,6 +16,8 @@ Bitrate
 Progress: 22 closed, 1 needs work (C7 B-frames), 1 frontier pair (C23/C24)
 ```
 
+> **~WuBu~ AGI** — one system, many repositories. This is the **video codec**. The Body is [WuBuOS](https://github.com/waefrebeorn/WuBuOS), the Brain wubuwizard, the Compiler WuBuNOS.
+
 ## Architecture
 
 WuBuCodec is a from-scratch C11 video codec. Every component is implemented, tested, and wired into a unified RDO encoder loop (C15 keystone).
